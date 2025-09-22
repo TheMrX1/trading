@@ -163,7 +163,7 @@ def build_info_text(ticker, user_id=None):
 
 # --- Обработка кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
+    query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
 
