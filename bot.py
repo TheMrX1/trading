@@ -14,7 +14,7 @@ TRUSTED_USERS = [1085064193]
 # Хранилище активов и состояний
 user_assets = {}
 user_states = {}
-user_settings = {}  # user_id -> {"eps_bp": int}
+user_settings = {}  # user_id -> dict с настройками
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -31,43 +31,27 @@ def main_menu():
 
 # --- Меню настроек ---
 def settings_menu(user_id):
-    current = user_settings.get(user_id, {}).get("eps_bp", 5)
+    settings = user_settings.get(user_id, {
+        "eps_bp": 5,
+        "big_buy_mult": 2,
+        "analysis_days": 5,
+        "cycle_tf": "5m"
+    })
     keyboard = [
-        [InlineKeyboardButton("2 bps", callback_data="set_eps_2"),
-         InlineKeyboardButton("5 bps", callback_data="set_eps_5"),
-         InlineKeyboardButton("10 bps", callback_data="set_eps_10")],
+        [InlineKeyboardButton("Порог ликвидности", callback_data="settings_eps")],
+        [InlineKeyboardButton("Крупная покупка", callback_data="settings_bigbuy")],
+        [InlineKeyboardButton("Глубина анализа", callback_data="settings_days")],
+        [InlineKeyboardButton("Таймфрейм цикла", callback_data="settings_tf")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
-    return InlineKeyboardMarkup(keyboard), current
-
-# --- Команда /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in TRUSTED_USERS:
-        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
-        return
-    await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu())
-
-# --- Пагинация меню активов ---
-async def show_assets_menu(query, user_id, page=0):
-    assets = user_assets.get(user_id, [])
-    per_page = 5
-    start = page * per_page
-    end = start + per_page
-    page_assets = assets[start:end]
-
-    keyboard = [[InlineKeyboardButton(a, callback_data=f"asset_{a}")] for a in page_assets]
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"page_{page-1}"))
-    if end < len(assets):
-        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"page_{page+1}"))
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
-    await query.edit_message_text("Ваши активы:", reply_markup=InlineKeyboardMarkup(keyboard))
+    text = (
+        f"⚙️ Настройки:\n\n"
+        f"Порог ликвидности: {settings['eps_bp']} bps\n"
+        f"Крупная покупка: {settings['big_buy_mult']}× среднего\n"
+        f"Глубина анализа: {settings['analysis_days']} дней\n"
+        f"Таймфрейм цикла: {settings['cycle_tf']}\n"
+    )
+    return InlineKeyboardMarkup(keyboard), text
 
 # --- Классификация стадии цикла ---
 def classify_cycle(df):
@@ -116,7 +100,7 @@ def estimate_liquidity(df, eps_bp=5):
     return int(Q)
 
 # --- Поиск последней крупной покупки ---
-def detect_last_large_buy(df):
+def detect_last_large_buy(df, mult=2):
     if df.empty:
         return None
     look = df.tail(100) if len(df) >= 100 else df
@@ -125,15 +109,22 @@ def detect_last_large_buy(df):
         row = df.iloc[idx]
         rng = (row["High"] - row["Low"]) if (row["High"] >= row["Low"]) else 0
         near_high = (rng == 0) or ((row["High"] - row["Close"]) <= 0.1 * (rng + 1e-9))
-        if (row["Volume"] > 2 * (avg_vol if avg_vol else 1)) and near_high:
+        if (row["Volume"] > mult * (avg_vol if avg_vol else 1)) and near_high:
             ts = df.index[idx].to_pydatetime()
             return ts, int(row["Volume"])
     return None
 
 # --- Сбор информации по тикеру ---
 def build_info_text(ticker, user_id=None):
+    settings = user_settings.get(user_id, {
+        "eps_bp": 5,
+        "big_buy_mult": 2,
+        "analysis_days": 5,
+        "cycle_tf": "5m"
+    })
+
     stock = yf.Ticker(ticker)
-    df = stock.history(period="5d", interval="5m")
+    df = stock.history(period=f"{settings['analysis_days']}d", interval=settings['cycle_tf'])
     if df.empty:
         return "Данные недоступны для этого тикера."
 
@@ -145,13 +136,9 @@ def build_info_text(ticker, user_id=None):
     avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
     rvol = (float(last["Volume"]) / avg_vol) if (avg_vol and avg_vol > 0) else 0.0
 
-    eps_bp = 5
-    if user_id and user_id in user_settings:
-        eps_bp = user_settings[user_id].get("eps_bp", 5)
-
-    approx_book_vol = estimate_liquidity(df.tail(200), eps_bp=eps_bp)
+    approx_book_vol = estimate_liquidity(df.tail(200), eps_bp=settings["eps_bp"])
     stage = classify_cycle(df)
-    big = detect_last_large_buy(df)
+    big = detect_last_large_buy(df, mult=settings["big_buy_mult"])
 
     info = []
     info.append(f"ℹ️ {ticker}")
@@ -162,9 +149,9 @@ def build_info_text(ticker, user_id=None):
     info.append(f"🧭 Стадия цикла: {stage}")
 
     if approx_book_vol is not None:
-        info.append(f"📥 Приближенный объем ликвидности (±{eps_bp/100:.2f}%): ~{approx_book_vol} акций")
+        info.append(f"📥 Приближенный объем ликвидности (±{settings['eps_bp']/100:.2f}%): ~{approx_book_vol} акций")
     else:
-                info.append("📥 Приближенный объем ликвидности: оценка недоступна")
+        info.append("📥 Приближенный объем ликвидности: оценка недоступна")
 
     if big:
         ts_big, vol_big = big
@@ -174,9 +161,9 @@ def build_info_text(ticker, user_id=None):
 
     return "\n".join(info)
 
-# --- Обработка нажатий кнопок ---
+# --- Обработка кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+        query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
 
@@ -216,20 +203,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Главное меню:", reply_markup=main_menu())
 
     elif query.data == "settings":
-        kb, current = settings_menu(user_id)
-        await query.edit_message_text(
-            f"⚙️ Настройки\n\nТекущий порог ликвидности: {current} bps",
-            reply_markup=kb
-        )
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(text, reply_markup=kb)
 
     elif query.data.startswith("set_eps_"):
         val = int(query.data.split("_")[2])
-        user_settings.setdefault(user_id, {})["eps_bp"] = val
-        kb, current = settings_menu(user_id)
-        await query.edit_message_text(
-            f"✅ Порог ликвидности обновлён: {val} bps",
-            reply_markup=kb
-        )
+        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
+        user_settings[user_id]["eps_bp"] = val
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(f"✅ Порог ликвидности обновлён: {val} bps\n\n{text}", reply_markup=kb)
+
+    elif query.data.startswith("set_bigbuy_"):
+        val = int(query.data.split("_")[2])
+        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
+        user_settings[user_id]["big_buy_mult"] = val
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(f"✅ Порог крупной покупки обновлён: {val}× среднего\n\n{text}", reply_markup=kb)
+
+    elif query.data.startswith("set_days_"):
+        val = int(query.data.split("_")[2])
+        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
+        user_settings[user_id]["analysis_days"] = val
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(f"✅ Глубина анализа обновлена: {val} дней\n\n{text}", reply_markup=kb)
+
+    elif query.data.startswith("set_tf_"):
+        val = query.data.split("_")[2]
+        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
+        user_settings[user_id]["cycle_tf"] = val
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(f"✅ Таймфрейм обновлён: {val}\n\n{text}", reply_markup=kb)
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -262,3 +265,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
