@@ -2,6 +2,8 @@ import logging
 import yfinance as yf
 import numpy as np
 import os
+import asyncio
+import threading
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,6 +23,8 @@ TRUSTED_USERS = [1085064193, 1563262750]
 user_assets = {}
 user_states = {}
 user_settings = {}  # user_id -> dict с настройками
+# Хранилище последних данных для отслеживания изменений
+last_asset_data = {}  # user_id -> {ticker -> {price, stage, last_large_buy}}
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -329,6 +333,165 @@ def build_info_text(ticker, user_id=None):
 
     return "\n\n".join(info)
 
+# --- Сохранение данных пользователей в файл ---
+def save_user_data():
+    """Сохраняет данные пользователей в файл users.txt"""
+    try:
+        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
+        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
+        
+        with open(users_file_path, "w", encoding="utf-8") as f:
+            for user_id in user_assets.keys():
+                f.write(f"USER_ID:{user_id}\n")
+                
+                # Записываем активы
+                f.write("ASSETS:\n")
+                for asset in user_assets.get(user_id, []):
+                    f.write(f"{asset}\n")
+                f.write("END_ASSETS\n")
+                
+                # Записываем настройки
+                f.write("SETTINGS:\n")
+                settings = user_settings.get(user_id, {
+                    "eps_bp": 5,
+                    "big_buy_mult": 2,
+                    "analysis_days": 5,
+                    "cycle_tf": "5m"
+                })
+                for key, value in settings.items():
+                    f.write(f"{key}={value}\n")
+                f.write("END_SETTINGS\n")
+                f.write("\n")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении данных пользователей: {e}")
+
+# --- Функция для получения текущих данных об активе ---
+def get_asset_current_data(ticker, user_id=None):
+    """Получает текущие данные об активе для отслеживания изменений"""
+    try:
+        settings = user_settings.get(user_id, {
+            "eps_bp": 5,
+            "big_buy_mult": 2,
+            "analysis_days": 5,
+            "cycle_tf": "5m"
+        })
+        
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=f"{settings['analysis_days']}d", interval=settings['cycle_tf'])
+        if df.empty:
+            return None
+            
+        # Определяем, какой столбец использовать для цен
+        price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
+        
+        last = df.iloc[-1]
+        price = round(float(last[price_column]), 4)
+        stage = classify_cycle(df)
+        large_buy = detect_last_large_buy(df, mult=settings["big_buy_mult"])
+        
+        return {
+            "price": price,
+            "stage": stage,
+            "last_large_buy": large_buy,
+            "timestamp": last.name.to_pydatetime()
+        }
+    except Exception as e:
+        logging.error(f"Ошибка при получении данных об активе {ticker}: {e}")
+        return None
+
+# --- Функция для проверки изменений и отправки уведомлений ---
+async def check_asset_changes(app):
+    """Проверяет изменения в активах и отправляет уведомления"""
+    try:
+        for user_id in user_assets.keys():
+            user_tickers = user_assets.get(user_id, [])
+            if not user_tickers:
+                continue
+                
+            # Инициализируем данные для пользователя, если их нет
+            if user_id not in last_asset_data:
+                last_asset_data[user_id] = {}
+                
+            for ticker in user_tickers:
+                current_data = get_asset_current_data(ticker, user_id)
+                if not current_data:
+                    continue
+                    
+                # Если это первая проверка для этого актива, просто сохраняем данные
+                if ticker not in last_asset_data[user_id]:
+                    last_asset_data[user_id][ticker] = current_data
+                    continue
+                    
+                # Получаем предыдущие данные
+                last_data = last_asset_data[user_id][ticker]
+                
+                # Проверяем изменения
+                notifications = []
+                
+                # Проверка изменения цены (более 1.5%)
+                price_change_percent = abs((current_data["price"] - last_data["price"]) / last_data["price"] * 100)
+                if price_change_percent >= 1.5:
+                    direction = "↑" if current_data["price"] > last_data["price"] else "↓"
+                    notifications.append(
+                        f"Цена: <s>{last_data['price']}</s> {direction} {current_data['price']} "
+                        f"({direction}{price_change_percent:.2f}%)"
+                    )
+                
+                # Проверка изменения стадии цикла
+                if current_data["stage"] != last_data["stage"]:
+                    notifications.append(
+                        f"Стадия: <s>{last_data['stage']}</s> → {current_data['stage']}"
+                    )
+                
+                # Проверка новой крупной покупки
+                if current_data["last_large_buy"] and (
+                    not last_data["last_large_buy"] or 
+                    current_data["last_large_buy"][0] > last_data["last_large_buy"][0]
+                ):
+                    buy_time = current_data["last_large_buy"][0].strftime('%Y-%m-%d %H:%M')
+                    buy_volume = current_data["last_large_buy"][1]
+                    notifications.append(
+                        f"Крупная покупка: {buy_volume} ({buy_time})"
+                    )
+                
+                # Если есть уведомления, отправляем их
+                if notifications:
+                    message = f"📈 <b>{ticker}</b>\n"
+                    message += "\n".join(notifications)
+                    message += f"\n\n⏱ Время: {current_data['timestamp'].strftime('%Y-%m-%d %H:%M')}"
+                    
+                    try:
+                        # Отправляем уведомление пользователю
+                        await app.bot.send_message(
+                            chat_id=user_id,
+                            text=message,
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logging.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
+                
+                # Обновляем данные
+                last_asset_data[user_id][ticker] = current_data
+                
+    except Exception as e:
+        logging.error(f"Ошибка при проверке изменений активов: {e}")
+
+# --- Функция для периодической проверки изменений ---
+def start_monitoring_thread(app):
+    """Запускает поток для периодической проверки изменений"""
+    async def monitoring_loop():
+        while True:
+            try:
+                await check_asset_changes(app)
+                # Ждем 5 минут перед следующей проверкой
+                await asyncio.sleep(300)  # 5 минут = 300 секунд
+            except Exception as e:
+                logging.error(f"Ошибка в цикле мониторинга: {e}")
+                await asyncio.sleep(60)  # В случае ошибки ждем 1 минуту перед повторной попыткой
+    
+    # Запускаем асинхронную задачу
+    asyncio.create_task(monitoring_loop())
+
 # --- Обработка кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -609,38 +772,6 @@ def load_user_data():
         user_assets = {}
         user_settings = {}
 
-# --- Сохранение данных пользователей в файл ---
-def save_user_data():
-    """Сохраняет данные пользователей в файл users.txt"""
-    try:
-        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
-        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
-        
-        with open(users_file_path, "w", encoding="utf-8") as f:
-            for user_id in user_assets.keys():
-                f.write(f"USER_ID:{user_id}\n")
-                
-                # Записываем активы
-                f.write("ASSETS:\n")
-                for asset in user_assets.get(user_id, []):
-                    f.write(f"{asset}\n")
-                f.write("END_ASSETS\n")
-                
-                # Записываем настройки
-                f.write("SETTINGS:\n")
-                settings = user_settings.get(user_id, {
-                    "eps_bp": 5,
-                    "big_buy_mult": 2,
-                    "analysis_days": 5,
-                    "cycle_tf": "5m"
-                })
-                for key, value in settings.items():
-                    f.write(f"{key}={value}\n")
-                f.write("END_SETTINGS\n")
-                f.write("\n")
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении данных пользователей: {e}")
-
 # Загружаем данные пользователей при запуске
 load_user_data()
 
@@ -650,8 +781,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    
+    # Запускаем мониторинг после старта бота
+    app.post_init = lambda app: start_monitoring_thread(app)
+    
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
