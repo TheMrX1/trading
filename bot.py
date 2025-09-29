@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # --- Главное меню ---
 def main_menu():
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
+        [InlineKeyboardButton("➕ Добавить актив!!!", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
     ]
