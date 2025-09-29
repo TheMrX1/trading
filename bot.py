@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in .env file")
 
-TRUSTED_USERS = [1085064193]
+TRUSTED_USERS = [1085064193, 1563262750]
 
 # Хранилище активов, состояний и настроек
 user_assets = {}
