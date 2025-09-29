@@ -379,6 +379,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Если список активов пользователя пуст, удаляем его
             if not user_assets[user_id]:
                 del user_assets[user_id]
+            # Сохраняем изменения в файл
+            save_user_data()
             await query.edit_message_text(f"✅ Актив {ticker} успешно удален!", reply_markup=main_menu())
         else:
             await query.edit_message_text(f"❌ Актив {ticker} не найден в вашем списке.", reply_markup=main_menu())
@@ -447,6 +449,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split("_")[2])
         user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
         user_settings[user_id]["eps_bp"] = val
+        # Сохраняем изменения в файл
+        save_user_data()
         kb, text = settings_menu(user_id)
         await query.edit_message_text(f"✅ Порог ликвидности обновлён: {val} bps\n\n{text}", reply_markup=kb)
 
@@ -454,6 +458,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split("_")[2])
         user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
         user_settings[user_id]["big_buy_mult"] = val
+        # Сохраняем изменения в файл
+        save_user_data()
         kb, text = settings_menu(user_id)
         await query.edit_message_text(f"✅ Порог крупной покупки обновлён: {val}× среднего\n\n{text}", reply_markup=kb)
 
@@ -461,6 +467,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split("_")[2])
         user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
         user_settings[user_id]["analysis_days"] = val
+        # Сохраняем изменения в файл
+        save_user_data()
         kb, text = settings_menu(user_id)
         await query.edit_message_text(f"✅ Глубина анализа обновлена: {val} дней\n\n{text}", reply_markup=kb)
 
@@ -468,23 +476,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = query.data.split("_")[2]
         user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
         user_settings[user_id]["cycle_tf"] = val
+        # Сохраняем изменения в файл
+        save_user_data()
         kb, text = settings_menu(user_id)
         await query.edit_message_text(f"✅ Таймфрейм обновлён: {val}\n\n{text}", reply_markup=kb)
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
-
-    elif query.data.startswith("delete_"):
-        ticker = query.data.split("_", 1)[1]
-        # Удаление актива из списка пользователя
-        if user_id in user_assets and ticker in user_assets[user_id]:
-            user_assets[user_id].remove(ticker)
-            # Если список активов пользователя пуст, удаляем его
-            if not user_assets[user_id]:
-                del user_assets[user_id]
-            await query.edit_message_text(f"✅ Актив {ticker} успешно удален!", reply_markup=main_menu())
-        else:
-            await query.edit_message_text(f"❌ Актив {ticker} не найден в вашем списке.", reply_markup=main_menu())
 
     elif query.data.startswith("page_"):
         page = int(query.data.split("_")[1])
@@ -538,8 +536,100 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_assets.setdefault(user_id, [])
         if ticker not in user_assets[user_id]:
             user_assets[user_id].append(ticker)
+            # Сохраняем изменения в файл
+            save_user_data()
         user_states[user_id] = None
         await update.message.reply_text(f"✅ Актив {ticker} добавлен!", reply_markup=main_menu())
+
+# --- Загрузка данных пользователей из файла ---
+def load_user_data():
+    """Загружает данные пользователей из файла users.txt"""
+    global user_assets, user_settings
+    try:
+        # Определяем путь к файлу users.txt в родительской директории
+        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
+        
+        if not os.path.exists(users_file_path):
+            # Если файл не существует, создаем пустой словарь данных
+            user_assets = {}
+            user_settings = {}
+            return
+        
+        with open(users_file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        current_user_id = None
+        current_section = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+                
+            if line.startswith("USER_ID:"):
+                current_user_id = int(line.split(":")[1])
+                user_assets[current_user_id] = []
+                user_settings[current_user_id] = {
+                    "eps_bp": 5,
+                    "big_buy_mult": 2,
+                    "analysis_days": 5,
+                    "cycle_tf": "5m"
+                }
+            elif line.startswith("ASSETS:") and current_user_id:
+                current_section = "assets"
+            elif line.startswith("SETTINGS:") and current_user_id:
+                current_section = "settings"
+            elif current_section == "assets" and current_user_id:
+                if line != "END_ASSETS":
+                    user_assets[current_user_id].append(line)
+            elif current_section == "settings" and current_user_id:
+                if line != "END_SETTINGS":
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        if key in ["eps_bp", "big_buy_mult", "analysis_days"]:
+                            user_settings[current_user_id][key] = int(value)
+                        else:
+                            user_settings[current_user_id][key] = value
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке данных пользователей: {e}")
+        # В случае ошибки используем пустые словари
+        user_assets = {}
+        user_settings = {}
+
+# --- Сохранение данных пользователей в файл ---
+def save_user_data():
+    """Сохраняет данные пользователей в файл users.txt"""
+    try:
+        # Определяем путь к файлу users.txt в родительской директории
+        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
+        
+        with open(users_file_path, "w", encoding="utf-8") as f:
+            for user_id in user_assets.keys():
+                f.write(f"USER_ID:{user_id}\n")
+                
+                # Записываем активы
+                f.write("ASSETS:\n")
+                for asset in user_assets.get(user_id, []):
+                    f.write(f"{asset}\n")
+                f.write("END_ASSETS\n")
+                
+                # Записываем настройки
+                f.write("SETTINGS:\n")
+                settings = user_settings.get(user_id, {
+                    "eps_bp": 5,
+                    "big_buy_mult": 2,
+                    "analysis_days": 5,
+                    "cycle_tf": "5m"
+                })
+                for key, value in settings.items():
+                    f.write(f"{key}={value}\n")
+                f.write("END_SETTINGS\n")
+                f.write("\n")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении данных пользователей: {e}")
+
+# Загружаем данные пользователей при запуске
+load_user_data()
 
 # --- Запуск бота ---
 def main():
