@@ -48,6 +48,7 @@ def settings_menu(user_id):
         [InlineKeyboardButton("Крупная покупка", callback_data="settings_bigbuy")],
         [InlineKeyboardButton("Глубина анализа", callback_data="settings_days")],
         [InlineKeyboardButton("Таймфрейм цикла", callback_data="settings_tf")],
+        [InlineKeyboardButton("🔄 Настройки по умолчанию", callback_data="settings_default")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
     text = (
@@ -481,6 +482,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb, text = settings_menu(user_id)
         await query.edit_message_text(f"✅ Таймфрейм обновлён: {val}\n\n{text}", reply_markup=kb)
 
+    elif query.data == "settings_default":
+        # Сброс настроек к значениям по умолчанию
+        user_settings[user_id] = {
+            "eps_bp": 5,
+            "big_buy_mult": 2,
+            "analysis_days": 5,
+            "cycle_tf": "5m"
+        }
+        # Сохраняем изменения в файл
+        save_user_data()
+        kb, text = settings_menu(user_id)
+        await query.edit_message_text(f"✅ Настройки сброшены к значениям по умолчанию\n\n{text}", reply_markup=kb)
+
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
 
@@ -546,13 +560,12 @@ def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
     global user_assets, user_settings
     try:
-        # Определяем путь к файлу users.txt в родительской директории
+        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
+        # Если файл не существует, создаем его с пустой структурой
         if not os.path.exists(users_file_path):
-            # Если файл не существует, создаем пустой словарь данных
-            user_assets = {}
-            user_settings = {}
+            save_user_data()  # Создаем пустой файл со структурой
             return
         
         with open(users_file_path, "r", encoding="utf-8") as f:
@@ -600,7 +613,7 @@ def load_user_data():
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
     try:
-        # Определяем путь к файлу users.txt в родительской директории
+        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
         with open(users_file_path, "w", encoding="utf-8") as f:
