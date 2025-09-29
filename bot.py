@@ -477,20 +477,16 @@ async def check_asset_changes(app):
         logging.error(f"Ошибка при проверке изменений активов: {e}")
 
 # --- Функция для периодической проверки изменений ---
-def start_monitoring_thread(app):
-    """Запускает поток для периодической проверки изменений"""
-    async def monitoring_loop():
-        while True:
-            try:
-                await check_asset_changes(app)
-                # Ждем 5 минут перед следующей проверкой
-                await asyncio.sleep(300)  # 5 минут = 300 секунд
-            except Exception as e:
-                logging.error(f"Ошибка в цикле мониторинга: {e}")
-                await asyncio.sleep(60)  # В случае ошибки ждем 1 минуту перед повторной попыткой
-    
-    # Запускаем асинхронную задачу
-    asyncio.create_task(monitoring_loop())
+async def monitoring_loop(app):
+    """Периодическая проверка изменений"""
+    while True:
+        try:
+            await check_asset_changes(app)
+            # Ждем 5 минут перед следующей проверкой
+            await asyncio.sleep(300)  # 5 минут = 300 секунд
+        except Exception as e:
+            logging.error(f"Ошибка в цикле мониторинга: {e}")
+            await asyncio.sleep(60)  # В случае ошибки ждем 1 минуту перед повторной попыткой
 
 # --- Обработка кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -783,7 +779,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
     # Запускаем мониторинг после старта бота
-    app.post_init = lambda app: start_monitoring_thread(app)
+    app.post_init = lambda app: asyncio.create_task(monitoring_loop(app))
     
     app.run_polling()
 
