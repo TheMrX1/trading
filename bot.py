@@ -24,6 +24,9 @@ user_states = {}
 user_comments = {}  # user_id -> {ticker: comment}
 user_settings = {}  # user_id -> dict с настройками (будет содержать только значения по умолчанию)
 
+# Хранилище для кэширования имен пользователей
+user_names_cache = {}
+
 # Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -338,21 +341,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_assets_menu(query, user_id, page=0)
 
     elif query.data == "group_assets":
-        # Получаем имя пользователя
-        user_name = query.from_user.username or f"User_{user_id}"
-        assets = user_assets.get(user_id, [])
+        # Собираем активы всех пользователей
+        all_assets_lines = ["👥 Активы группы:\n"]
+        has_assets = False
         
-        if not assets:
-            message_text = f"👥 {user_name}\n\nУ вас пока нет активов."
-        else:
-            message_lines = [f"👥 {user_name}\n"]
-            for asset in assets:
-                comment = user_comments.get(user_id, {}).get(asset, asset)
-                message_lines.append(f"• {asset} ({comment})")
-            message_text = "\n".join(message_lines)
+        # Получаем информацию о всех пользователях
+        for uid in TRUSTED_USERS:
+            # Проверяем, есть ли данные о пользователе
+            assets = user_assets.get(uid, [])
+            comments = user_comments.get(uid, {})
+            
+            if assets:
+                has_assets = True
+                # Получаем имя пользователя из кэша или используем ID
+                user_name = user_names_cache.get(uid, f"User_{uid}")
+                # Добавляем имя пользователя
+                all_assets_lines.append(f"👤 {user_name}:")
+                # Добавляем активы пользователя
+                for asset in assets:
+                    comment = comments.get(asset, asset)
+                    all_assets_lines.append(f"  • {asset} ({comment})")
+                all_assets_lines.append("")  # Пустая строка для разделения
+        
+        if not has_assets:
+            all_assets_lines = ["👥 Активы группы:\n\nПока нет активов у пользователей."]
         
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("\n".join(all_assets_lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
@@ -467,6 +482,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
         return
+
+    # Кэшируем имя пользователя
+    user_name = update.effective_user.username
+    if user_name:
+        user_names_cache[user_id] = user_name
 
     if user_states.get(user_id) == "waiting_for_asset":
         # Ожидаем тикер актива
