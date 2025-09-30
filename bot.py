@@ -15,12 +15,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in .env file")
 
-TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336]
+#7424028554 - id Твинка для проверки
+TRUSTED_USERS = [1085064193, 7424028554]
 
 # Хранилище активов, состояний и настроек
 user_assets = {}
 user_states = {}
-user_settings = {}  # user_id -> dict с настройками
+user_comments = {}  # user_id -> {ticker: comment}
+user_settings = {}  # user_id -> dict с настройками (будет содержать только значения по умолчанию)
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -31,34 +33,12 @@ def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
+        [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # --- Меню настроек ---
-def settings_menu(user_id):
-    settings = user_settings.get(user_id, {
-        "eps_bp": 5,
-        "big_buy_mult": 2,
-        "analysis_days": 5,
-        "cycle_tf": "5m"
-    })
-    keyboard = [
-        [InlineKeyboardButton("Порог ликвидности", callback_data="settings_eps")],
-        [InlineKeyboardButton("Крупная покупка", callback_data="settings_bigbuy")],
-        [InlineKeyboardButton("Глубина анализа", callback_data="settings_days")],
-        [InlineKeyboardButton("Таймфрейм цикла", callback_data="settings_tf")],
-        [InlineKeyboardButton("🔄 Настройки по умолчанию", callback_data="settings_default")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
-    ]
-    text = (
-        f"⚙️ Настройки:\n\n"
-        f"Порог ликвидности: {settings['eps_bp']} bps\n"
-        f"Крупная покупка: {settings['big_buy_mult']}× среднего\n"
-        f"Глубина анализа: {settings['analysis_days']} дней\n"
-        f"Таймфрейм цикла: {settings['cycle_tf']}\n"
-    )
-    return InlineKeyboardMarkup(keyboard), text
+# Удалено, так как настройки больше не доступны пользователям
 
 # --- Команда /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,7 +56,11 @@ async def show_assets_menu(query, user_id, page=0):
     end = start + per_page
     page_assets = assets[start:end]
 
-    keyboard = [[InlineKeyboardButton(a, callback_data=f"asset_{a}")] for a in page_assets]
+    # Используем комментарий вместо тикера, если он есть
+    keyboard = []
+    for asset in page_assets:
+        comment = user_comments.get(user_id, {}).get(asset, asset)
+        keyboard.append([InlineKeyboardButton(comment, callback_data=f"asset_{asset}")])
 
     nav_buttons = []
     if page > 0:
@@ -278,12 +262,13 @@ def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
     return beta, f"https://finance.yahoo.com/quote/{ticker}"
 
 def build_info_text(ticker, user_id=None):
-    settings = user_settings.get(user_id, {
+    # Используем настройки по умолчанию
+    settings = {
         "eps_bp": 5,
         "big_buy_mult": 2,
         "analysis_days": 5,
         "cycle_tf": "5m"
-    })
+    }
 
     stock = yf.Ticker(ticker)
     df = stock.history(period=f"{settings['analysis_days']}d", interval=settings['cycle_tf'])
@@ -352,15 +337,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_assets_menu(query, user_id, page=0)
 
+    elif query.data == "group_assets":
+        # Получаем имя пользователя
+        user_name = query.from_user.username or f"User_{user_id}"
+        assets = user_assets.get(user_id, [])
+        
+        if not assets:
+            message_text = f"👥 {user_name}\n\nУ вас пока нет активов."
+        else:
+            message_lines = [f"👥 {user_name}\n"]
+            for asset in assets:
+                comment = user_comments.get(user_id, {}).get(asset, asset)
+                message_lines.append(f"• {asset} ({comment})")
+            message_text = "\n".join(message_lines)
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
         keyboard = [
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
             [InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calc_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
-        await query.edit_message_text(f"Актив {ticker}", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Актив {comment} ({ticker})", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
@@ -377,6 +380,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Удаление актива из списка пользователя
         if user_id in user_assets and ticker in user_assets[user_id]:
             user_assets[user_id].remove(ticker)
+            # Удаляем комментарий, если он есть
+            if user_id in user_comments and ticker in user_comments[user_id]:
+                del user_comments[user_id][ticker]
+                # Если словарь комментариев пользователя пуст, удаляем его
+                if not user_comments[user_id]:
+                    del user_comments[user_id]
             # Если список активов пользователя пуст, удаляем его
             if not user_assets[user_id]:
                 del user_assets[user_id]
@@ -388,6 +397,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("calc_"):
         ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
         # Показываем меню калькулятора
         keyboard = [
             [InlineKeyboardButton("CAGR", callback_data=f"cagr_{ticker}"),
@@ -395,17 +405,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Бета-коэффициент", callback_data=f"beta_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
-        await query.edit_message_text(f"🧮 Калькулятор для {ticker}\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("cagr_"):
         ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
             # Рассчитываем CAGR для 3 лет и 5 лет
             cagr_5y_value, source_url = calculate_cagr(ticker, period="5y")
             cagr_3y_value, _ = calculate_cagr(ticker, period="3y")
             
             # Формируем сообщение с обоими значениями
-            message_text = f"📈 CAGR для {ticker}:\n\n"
+            message_text = f"📈 CAGR для {comment} ({ticker}):\n\n"
             message_text += f"5-летний: {cagr_5y_value:.2f}%\n"
             message_text += f"3-летний: {cagr_3y_value:.2f}%\n\n"
             message_text += f"Источник данных: {source_url}\n"
@@ -413,26 +424,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("eps_"):
         ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
             eps_value, source_url = calculate_eps(ticker)
-            message_text = f"📊 EPS для {ticker}: ${eps_value:.2f}\n\nИсточник данных: {source_url}"
+            message_text = f"📊 EPS для {comment} ({ticker}): ${eps_value:.2f}\n\nИсточник данных: {source_url}"
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете EPS для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете EPS для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("beta_"):
         ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
             # Рассчитываем оба значения бета
             beta_3y_value, source_url = calculate_beta(ticker)
             beta_5y_value, _ = calculate_beta_5y_monthly(ticker)
             
             # Формируем сообщение с обоими значениями
-            message_text = f"📊 Бета-коэффициент для {ticker}:\n\n"
+            message_text = f"📊 Бета-коэффициент для {comment} ({ticker}):\n\n"
             message_text += f"5-летний (месячные данные): {beta_5y_value:.2f}\n"
             message_text += f"3-летний (дневные данные): {beta_3y_value:.2f}\n\n"
             message_text += f"Источник данных: {source_url}\n"
@@ -440,60 +453,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
-
-    elif query.data == "settings":
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(text, reply_markup=kb)
-
-    elif query.data.startswith("set_eps_"):
-        val = int(query.data.split("_")[2])
-        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
-        user_settings[user_id]["eps_bp"] = val
-        # Сохраняем изменения в файл
-        save_user_data()
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(f"✅ Порог ликвидности обновлён: {val} bps\n\n{text}", reply_markup=kb)
-
-    elif query.data.startswith("set_bigbuy_"):
-        val = int(query.data.split("_")[2])
-        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
-        user_settings[user_id]["big_buy_mult"] = val
-        # Сохраняем изменения в файл
-        save_user_data()
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(f"✅ Порог крупной покупки обновлён: {val}× среднего\n\n{text}", reply_markup=kb)
-
-    elif query.data.startswith("set_days_"):
-        val = int(query.data.split("_")[2])
-        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
-        user_settings[user_id]["analysis_days"] = val
-        # Сохраняем изменения в файл
-        save_user_data()
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(f"✅ Глубина анализа обновлена: {val} дней\n\n{text}", reply_markup=kb)
-
-    elif query.data.startswith("set_tf_"):
-        val = query.data.split("_")[2]
-        user_settings.setdefault(user_id, {"eps_bp": 5, "big_buy_mult": 2, "analysis_days": 5, "cycle_tf": "5m"})
-        user_settings[user_id]["cycle_tf"] = val
-        # Сохраняем изменения в файл
-        save_user_data()
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(f"✅ Таймфрейм обновлён: {val}\n\n{text}", reply_markup=kb)
-
-    elif query.data == "settings_default":
-        # Сброс настроек к значениям по умолчанию
-        user_settings[user_id] = {
-            "eps_bp": 5,
-            "big_buy_mult": 2,
-            "analysis_days": 5,
-            "cycle_tf": "5m"
-        }
-        # Сохраняем изменения в файл
-        save_user_data()
-        kb, text = settings_menu(user_id)
-        await query.edit_message_text(f"✅ Настройки сброшены к значениям по умолчанию\n\n{text}", reply_markup=kb)
+            await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -502,63 +462,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(query.data.split("_")[1])
         await show_assets_menu(query, user_id, page)
 
-    elif query.data == "settings_eps":
-        kb = [
-            [InlineKeyboardButton("2 bps", callback_data="set_eps_2"),
-             InlineKeyboardButton("5 bps", callback_data="set_eps_5"),
-             InlineKeyboardButton("10 bps", callback_data="set_eps_10")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
-        ]
-        await query.edit_message_text("Выберите порог ликвидности:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif query.data == "settings_bigbuy":
-        kb = [
-            [InlineKeyboardButton("2×", callback_data="set_bigbuy_2"),
-             InlineKeyboardButton("3×", callback_data="set_bigbuy_3"),
-             InlineKeyboardButton("5×", callback_data="set_bigbuy_5")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
-        ]
-        await query.edit_message_text("Выберите коэффициент крупной покупки:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif query.data == "settings_days":
-        kb = [
-            [InlineKeyboardButton("1 день", callback_data="set_days_1"),
-             InlineKeyboardButton("3 дня", callback_data="set_days_3"),
-             InlineKeyboardButton("5 дней", callback_data="set_days_5")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
-        ]
-        await query.edit_message_text("Выберите глубину анализа:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif query.data == "settings_tf":
-        kb = [
-            [InlineKeyboardButton("5m", callback_data="set_tf_5m"),
-             InlineKeyboardButton("15m", callback_data="set_tf_15m")],
-            [InlineKeyboardButton("1h", callback_data="set_tf_1h"),
-             InlineKeyboardButton("1d", callback_data="set_tf_1d")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
-        ]
-        await query.edit_message_text("Выберите таймфрейм для стадий цикла:", reply_markup=InlineKeyboardMarkup(kb))
-
-# --- Обработка текстовых сообщений ---
+    # --- Обработка текстовых сообщений ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
         return
 
     if user_states.get(user_id) == "waiting_for_asset":
+        # Ожидаем тикер актива
         ticker = update.message.text.strip().upper()
-        user_assets.setdefault(user_id, [])
-        if ticker not in user_assets[user_id]:
-            user_assets[user_id].append(ticker)
+        user_states[user_id] = f"waiting_for_comment_{ticker}"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        await update.message.reply_text(f"Введите комментарий для актива {ticker} (например, Apple):",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
+    elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
+        # Получаем тикер из состояния
+        parts = user_states[user_id].split("_", 3)
+        if len(parts) >= 4:
+            ticker = parts[3]
+            comment = update.message.text.strip()
+            
+            # Добавляем актив и комментарий
+            user_assets.setdefault(user_id, [])
+            if ticker not in user_assets[user_id]:
+                user_assets[user_id].append(ticker)
+            
+            # Сохраняем комментарий
+            user_comments.setdefault(user_id, {})
+            user_comments[user_id][ticker] = comment
+            
             # Сохраняем изменения в файл
             save_user_data()
-        user_states[user_id] = None
-        await update.message.reply_text(f"✅ Актив {ticker} добавлен!", reply_markup=main_menu())
+            
+            user_states[user_id] = None
+            await update.message.reply_text(f"✅ Актив {ticker} добавлен с комментарием '{comment}'!", reply_markup=main_menu())
 
 # --- Загрузка данных пользователей из файла ---
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_settings
+    global user_assets, user_comments, user_settings
     try:
         # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
@@ -582,6 +524,8 @@ def load_user_data():
             if line.startswith("USER_ID:"):
                 current_user_id = int(line.split(":")[1])
                 user_assets[current_user_id] = []
+                user_comments[current_user_id] = {}
+                # Настройки по умолчанию для всех пользователей
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -590,23 +534,28 @@ def load_user_data():
                 }
             elif line.startswith("ASSETS:") and current_user_id:
                 current_section = "assets"
+            elif line.startswith("COMMENTS:") and current_user_id:
+                current_section = "comments"
             elif line.startswith("SETTINGS:") and current_user_id:
+                # Игнорируем пользовательские настройки, используем только значения по умолчанию
                 current_section = "settings"
             elif current_section == "assets" and current_user_id:
                 if line != "END_ASSETS":
                     user_assets[current_user_id].append(line)
-            elif current_section == "settings" and current_user_id:
-                if line != "END_SETTINGS":
+            elif current_section == "comments" and current_user_id:
+                if line != "END_COMMENTS":
                     if "=" in line:
-                        key, value = line.split("=", 1)
-                        if key in ["eps_bp", "big_buy_mult", "analysis_days"]:
-                            user_settings[current_user_id][key] = int(value)
-                        else:
-                            user_settings[current_user_id][key] = value
+                        ticker, comment = line.split("=", 1)
+                        user_comments[current_user_id][ticker] = comment
+            elif current_section == "settings" and current_user_id:
+                # Игнорируем пользовательские настройки
+                if line == "END_SETTINGS":
+                    current_section = None
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
         # В случае ошибки используем пустые словари
         user_assets = {}
+        user_comments = {}
         user_settings = {}
 
 # --- Сохранение данных пользователей в файл ---
@@ -626,14 +575,21 @@ def save_user_data():
                     f.write(f"{asset}\n")
                 f.write("END_ASSETS\n")
                 
-                # Записываем настройки
+                # Записываем комментарии
+                f.write("COMMENTS:\n")
+                comments = user_comments.get(user_id, {})
+                for ticker, comment in comments.items():
+                    f.write(f"{ticker}={comment}\n")
+                f.write("END_COMMENTS\n")
+                
+                # Записываем настройки (только значения по умолчанию)
                 f.write("SETTINGS:\n")
-                settings = user_settings.get(user_id, {
+                settings = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
                     "analysis_days": 5,
                     "cycle_tf": "5m"
-                })
+                }
                 for key, value in settings.items():
                     f.write(f"{key}={value}\n")
                 f.write("END_SETTINGS\n")
