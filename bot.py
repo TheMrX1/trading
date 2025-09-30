@@ -16,7 +16,7 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in .env file")
 
 #7424028554 - id Твинка для проверки
-TRUSTED_USERS = [1085064193, 7424028554]
+TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336]
 
 # Хранилище активов, состояний и настроек
 user_assets = {}
