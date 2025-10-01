@@ -274,9 +274,8 @@ def build_info_text(ticker, user_id=None):
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
     info.append(f"📊 Объём (последняя свеча): {int(last['Volume'])}")
-    info.append(f"🧭 Стадия цикла ({settings['analysis_days']} дней): {stage}")
     
-    # Добавляем стадии цикла для разных периодов
+    # Добавляем стадии цикла для разных периодов (без дублирования 5 дней)
     cycle_periods = [
         (5, "5 дней", "5m"),
         (30, "1 месяц", "1d"),
@@ -364,11 +363,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 has_assets = True
                 # Получаем имя пользователя из кэша или используем ID
                 user_name = user_names_cache.get(uid, f"User_{uid}")
-                # Добавляем @ перед username
-                if not user_name.startswith("User_"):
-                    display_name = f"@{user_name}"
-                else:
+                # Добавляем @ перед username, если это имя пользователя, а не ID
+                if user_name.startswith("User_"):
                     display_name = user_name
+                else:
+                    display_name = f"@{user_name}"
                 # Добавляем имя пользователя
                 all_assets_lines.append(f"👤 {display_name}:")
                 # Добавляем активы пользователя
@@ -431,7 +430,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("CAGR", callback_data=f"cagr_{ticker}"),
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
-            [InlineKeyboardButton("Бета-коэффициент", callback_data=f"beta_{ticker}"),
+            [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
             [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
@@ -485,6 +484,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+
+    elif query.data.startswith("pe_"):
+        ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        try:
+            pe_value, source_url = calculate_pe_ratio(ticker)
+            message_text = f"📊 P/E Ratio для {comment} ({ticker}): {pe_value:.2f}\n\nИсточник данных: {source_url}"
+            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка при получении P/E Ratio для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+
+    elif query.data.startswith("rvol_"):
+        ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        try:
+            # Получаем данные для расчета RVOL
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="30d", interval="1d")  # Используем 30 дней с дневным интервалом
+            
+            if df.empty:
+                raise Exception("Недостаточно данных для расчета RVOL")
+            
+            # Определяем, какой столбец использовать для цен
+            price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
+            
+            last = df.iloc[-1]
+            look = df.tail(100) if len(df) >= 100 else df
+            avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
+            rvol = 0.0
+            if avg_vol is not None and avg_vol > 0:
+                rvol = float(last["Volume"]) / avg_vol
+            
+            message_text = f"📊 RVOL для {comment} ({ticker}): {rvol:.2f}\n\n"
+            message_text += f"Объём (последняя свеча): {int(last['Volume'])}\n"
+            message_text += f"Средний объём: {int(avg_vol)}\n\n"
+            message_text += f"Источник данных: https://finance.yahoo.com/quote/{ticker}/key-statistics"
+            
+            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
