@@ -18,6 +18,17 @@ if not BOT_TOKEN:
 #TRUSTED_USERS = [1085064193, 7424028554]
 TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336]
 
+# Отображение имен пользователей
+USER_NAMES = {
+    1085064193: "Дима",
+    1563262750: "Маша",
+    1221434895: "Кира",
+    1229198783: "Катя",
+    829213580: "Лиза",
+    1647115336: "Ульяна",
+    7424028554: "MrX"
+}
+
 # Хранилище активов, состояний и настроек
 user_assets = {}
 user_states = {}
@@ -26,6 +37,9 @@ user_settings = {}  # user_id -> dict с настройками (будет со
 
 # Хранилище для кэширования имен пользователей
 user_names_cache = {}
+
+# Хранилище для черного списка
+blacklist = {}  # ticker -> {user_id, comment}
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +50,8 @@ def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
-        [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets")]
+        [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
+         InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -311,11 +326,10 @@ def build_info_text(ticker, user_id=None):
         else:
             cycle_lines.append(f"{label} ({days}d/{interval}): данные недоступны")
     
-    info.append("\n".join(cycle_lines))
-    
-    # Добавляем ссылку на график сразу после текста стадии цикла
+    # Объединяем строки цикла и добавляем ссылку на график сразу после текста
+    cycle_info = "\n".join(cycle_lines)
     chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
-    info.append(chart_link)
+    info.append(f"{cycle_info}\n{chart_link}")
     
     if approx_book_vol is not None:
         info.append(f"📥 Объем стакана (приближенный): ~{approx_book_vol} акций")
@@ -372,14 +386,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if assets:
                 has_assets = True
                 # Получаем имя пользователя из кэша или используем ID
-                user_name = user_names_cache.get(uid, f"User_{uid}")
-                # Добавляем @ перед username, если это имя пользователя, а не ID
-                if user_name.startswith("User_"):
-                    display_name = user_name
-                else:
-                    display_name = f"@{user_name}"
+                user_display_name = get_user_name(uid)
                 # Добавляем имя пользователя
-                all_assets_lines.append(f"👤 {display_name}:")
+                all_assets_lines.append(f"👤 {user_display_name}:")
                 # Добавляем активы пользователя
                 for asset in assets:
                     comment = comments.get(asset, asset)
@@ -391,6 +400,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("\n".join(all_assets_lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "blacklist":
+        # Отображаем черный список
+        blacklist_lines = ["🚫 Черный список:\n"]
+        if blacklist:
+            for ticker, data in blacklist.items():
+                user_name = get_user_name(data["user_id"])
+                blacklist_lines.append(f"• {ticker} (добавил: {user_name}) - {data['comment']}")
+        else:
+            blacklist_lines.append("Черный список пуст.")
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить в ЧС", callback_data="add_to_blacklist")],
+            [InlineKeyboardButton("🗑 Удалить из ЧС", callback_data="remove_from_blacklist")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
+        ]
+        await query.edit_message_text("\n".join(blacklist_lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "add_to_blacklist":
+        user_states[user_id] = "waiting_for_blacklist_ticker"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="blacklist")]]
+        await query.edit_message_text("Введите тикер актива для добавления в черный список:",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "remove_from_blacklist":
+        user_states[user_id] = "waiting_for_remove_blacklist_ticker"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="blacklist")]]
+        await query.edit_message_text("Введите тикер актива для удаления из черного списка:",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
@@ -544,6 +582,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(query.data.split("_")[1])
         await show_assets_menu(query, user_id, page)
 
+    elif query.data.startswith("force_add_"):
+        ticker = query.data.split("_", 2)[2]
+        user_states[user_id] = f"force_add_{ticker}"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        await query.edit_message_text(f"Введите комментарий для принудительного добавления {ticker} (актив в черном списке!):",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
+
     # --- Обработка текстовых сообщений ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -558,10 +603,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_states.get(user_id) == "waiting_for_asset":
         # Ожидаем тикер актива
         ticker = update.message.text.strip().upper()
+        
+        # Проверяем, не находится ли актив в черном списке
+        if ticker in blacklist:
+            # Актив в черном списке
+            blacklist_data = blacklist[ticker]
+            user_name = get_user_name(blacklist_data["user_id"])
+            comment = blacklist_data["comment"]
+            
+            message = f"⚠️ Актив {ticker} находится в черном списке!\n"
+            message += f"Добавил: {user_name}\n"
+            message += f"Комментарий: {comment}"
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить", callback_data=f"force_add_{ticker}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
+            ]
+            await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+            user_states[user_id] = None
+            return
+            
         user_states[user_id] = f"waiting_for_comment_{ticker}"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await update.message.reply_text(f"Введите комментарий для актива {ticker} (например, Apple):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
+                                      
     elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
         # Получаем тикер из состояния
         parts = user_states[user_id].split("_", 3)
@@ -583,6 +649,79 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен с комментарием '{comment}'!", reply_markup=main_menu())
+            
+    elif user_states.get(user_id) == "waiting_for_blacklist_ticker":
+        # Ожидаем тикер для добавления в черный список
+        ticker = update.message.text.strip().upper()
+        user_states[user_id] = f"waiting_for_blacklist_comment_{ticker}"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="blacklist")]]
+        await update.message.reply_text(f"Введите комментарий для добавления {ticker} в черный список:",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
+                                      
+    elif user_states.get(user_id, "").startswith("waiting_for_blacklist_comment_"):
+        # Получаем тикер из состояния
+        parts = user_states[user_id].split("_", 4)
+        if len(parts) >= 5:
+            ticker = parts[4]
+            comment = update.message.text.strip()
+            
+            # Добавляем актив в черный список
+            blacklist[ticker] = {"user_id": user_id, "comment": comment}
+            
+            # Сохраняем черный список
+            save_blacklist()
+            
+            # Удаляем актив из списков всех пользователей
+            remove_asset_from_all_users(ticker)
+            
+            # Сохраняем изменения в файл пользователя
+            save_user_data()
+            
+            # Отправляем уведомления пользователям
+            await notify_users_about_blacklist(context, ticker, user_id, comment)
+            
+            user_states[user_id] = None
+            await update.message.reply_text(f"✅ Актив {ticker} добавлен в черный список с комментарием '{comment}'!", reply_markup=main_menu())
+            
+    elif user_states.get(user_id) == "waiting_for_remove_blacklist_ticker":
+        # Ожидаем тикер для удаления из черного списка
+        ticker = update.message.text.strip().upper()
+        
+        # Проверяем, находится ли актив в черном списке
+        if ticker in blacklist:
+            # Удаляем из черного списка
+            del blacklist[ticker]
+            
+            # Сохраняем черный список
+            save_blacklist()
+            
+            await update.message.reply_text(f"✅ Актив {ticker} удален из черного списка!", reply_markup=main_menu())
+        else:
+            await update.message.reply_text(f"❌ Актив {ticker} не найден в черном списке.", reply_markup=main_menu())
+            
+        user_states[user_id] = None
+        
+    elif user_states.get(user_id, "").startswith("force_add_"):
+        # Принудительное добавление актива, который в черном списке
+        parts = user_states[user_id].split("_", 2)
+        if len(parts) >= 3:
+            ticker = parts[2]
+            comment = update.message.text.strip()
+            
+            # Добавляем актив и комментарий
+            user_assets.setdefault(user_id, [])
+            if ticker not in user_assets[user_id]:
+                user_assets[user_id].append(ticker)
+            
+            # Сохраняем комментарий
+            user_comments.setdefault(user_id, {})
+            user_comments[user_id][ticker] = comment
+            
+            # Сохраняем изменения в файл
+            save_user_data()
+            
+            user_states[user_id] = None
+            await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
 
 # --- Загрузка данных пользователей из файла ---
 def load_user_data():
@@ -686,6 +825,89 @@ def save_user_data():
 
 # Загружаем данные пользователей при запуске
 load_user_data()
+
+# --- Загрузка черного списка из файла ---
+def load_blacklist():
+    """Загружает черный список из файла blacklist.txt"""
+    global blacklist
+    try:
+        # Определяем путь к файлу blacklist.txt в директории mybot (на уровень выше trading)
+        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
+        
+        # Если файл не существует, создаем его с пустой структурой
+        if not os.path.exists(blacklist_file_path):
+            save_blacklist()  # Создаем пустой файл со структурой
+            return
+        
+        with open(blacklist_file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+                
+            if "=" in line:
+                parts = line.split("=", 2)
+                if len(parts) >= 3:
+                    ticker = parts[0]
+                    user_id = int(parts[1])
+                    comment = parts[2]
+                    blacklist[ticker] = {"user_id": user_id, "comment": comment}
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке черного списка: {e}")
+        # В случае ошибки используем пустой словарь
+        blacklist = {}
+
+# --- Сохранение черного списка в файл ---
+def save_blacklist():
+    """Сохраняет черный список в файл blacklist.txt"""
+    try:
+        # Определяем путь к файлу blacklist.txt в директории mybot (на уровень выше trading)
+        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
+        
+        with open(blacklist_file_path, "w", encoding="utf-8") as f:
+            for ticker, data in blacklist.items():
+                f.write(f"{ticker}={data['user_id']}={data['comment']}\n")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении черного списка: {e}")
+
+# --- Получение имени пользователя ---
+def get_user_name(user_id):
+    """Получает имя пользователя по ID"""
+    return USER_NAMES.get(user_id, f"User_{user_id}")
+
+# --- Удаление актива из всех пользователей ---
+def remove_asset_from_all_users(ticker):
+    """Удаляет актив из списков всех пользователей"""
+    for user_id in user_assets:
+        if ticker in user_assets[user_id]:
+            user_assets[user_id].remove(ticker)
+            # Удаляем комментарий, если он есть
+            if user_id in user_comments and ticker in user_comments[user_id]:
+                del user_comments[user_id][ticker]
+                # Если словарь комментариев пользователя пуст, удаляем его
+                if not user_comments[user_id]:
+                    del user_comments[user_id]
+
+# --- Отправка уведомлений пользователям об добавлении в черный список ---
+async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
+    """Отправляет уведомления пользователям об добавлении актива в черный список"""
+    added_by_name = get_user_name(added_by_user_id)
+    
+    # Проверяем, у кого есть эта акция
+    for user_id in user_assets:
+        if ticker in user_assets[user_id]:
+            try:
+                # Отправляем уведомление пользователю
+                message = f"⚠️ Актив {ticker} был добавлен в черный список пользователем {added_by_name}.\n"
+                message += f"Комментарий: {comment}"
+                await context.bot.send_message(chat_id=user_id, text=message)
+            except Exception as e:
+                logging.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
+
+# Загружаем черный список при запуске
+load_blacklist()
 
 # --- Расчет P/E Ratio ---
 def calculate_pe_ratio(ticker):
