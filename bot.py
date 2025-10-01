@@ -280,7 +280,9 @@ def build_info_text(ticker, user_id=None):
     info.append(f"ℹ️ {ticker}")
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
-    info.append(f"📊 Объём (последняя свеча): {int(last['Volume'])}")
+    # Добавляем информацию о периоде данных
+    info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
+    info.append(f"📈 RVOL: {rvol:.2f}× среднего")
     
     # Добавляем стадии цикла для разных периодов (без дублирования 5 дней)
     cycle_periods = [
