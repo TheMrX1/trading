@@ -313,6 +313,10 @@ def build_info_text(ticker, user_id=None):
     
     info.append("\n".join(cycle_lines))
     
+    # Добавляем ссылку на график сразу после текста стадии цикла
+    chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
+    info.append(chart_link)
+    
     if approx_book_vol is not None:
         info.append(f"📥 Объем стакана (приближенный): ~{approx_book_vol} акций")
     else:
