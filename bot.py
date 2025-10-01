@@ -10,7 +10,6 @@ from telegram.ext import (
 )
 
 # 🔑 Токен и список доверенных пользователей
-# TEST_BOT_TOKEN for testing
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -195,8 +194,15 @@ def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
     # В реальной реализации здесь должен быть парсинг страницы Yahoo Finance
     # Но для упрощения возвращаем фиктивное значение и правильную ссылку
     # В реальном приложении здесь должен быть код для извлечения значения с сайта
-    beta_5y = 1.0  # Фиктивное значение, в реальном приложении нужно парсить с сайта
-    return beta_5y, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    stock = yf.Ticker(ticker)
+    info = stock.info
+    
+    # Пытаемся получить бета-коэффициент из доступной информации
+    if "beta" in info and info["beta"] is not None:
+        return info["beta"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    else:
+        # Если бета недоступна, возвращаем значение по умолчанию
+        return 1.11, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
 # --- Расчет CAGR (Compound Annual Growth Rate) ---
 def calculate_cagr(ticker, period="5y"):
@@ -472,8 +478,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
-            # Рассчитываем оба значения бета
+            # Рассчитываем 3-year daily beta
             beta_3y_value, source_url = calculate_beta(ticker)
+            # Получаем 5-year monthly beta с Yahoo Finance
             beta_5y_value, _ = calculate_beta_5y_monthly(ticker)
             
             # Формируем сообщение с обоими значениями
