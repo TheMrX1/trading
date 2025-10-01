@@ -267,9 +267,6 @@ def build_info_text(ticker, user_id=None):
 
     look = df.tail(100) if len(df) >= 100 else df
     avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
-    rvol = 0.0
-    if avg_vol is not None and avg_vol > 0:
-        rvol = float(last["Volume"]) / avg_vol
 
     approx_book_vol = estimate_liquidity(df.tail(200), eps_bp=settings["eps_bp"])
     stage = classify_cycle(df)
@@ -282,7 +279,6 @@ def build_info_text(ticker, user_id=None):
     info.append(f"💵 Цена: {price} USD")
     # Добавляем информацию о периоде данных
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
-    info.append(f"📈 RVOL: {rvol:.2f}× среднего")
     
     # Добавляем стадии цикла для разных периодов (без дублирования 5 дней)
     cycle_periods = [
@@ -528,7 +524,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rvol = float(last["Volume"]) / avg_vol
             
             message_text = f"📊 RVOL для {comment} ({ticker}): {rvol:.2f}\n\n"
-            message_text += f"Объём (последняя свеча): {int(last['Volume'])}\n"
+            # Добавляем информацию о периоде данных
+            message_text += f"Объём (последняя свеча 30d/1d): {int(last['Volume'])}\n"
             message_text += f"Средний объём: {int(avg_vol)}\n\n"
             message_text += f"Источник данных: https://finance.yahoo.com/quote/{ticker}/key-statistics"
             
