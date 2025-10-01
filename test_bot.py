@@ -190,9 +190,39 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
 
 # --- Расчет бета-коэффициента (5 лет, месячные данные) ---
 def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
-    # Для 5y monthly мы не рассчитываем значение, а просто возвращаем ссылку
-    # где пользователь может найти это значение
-    return None, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    # Получаем данные для актива и эталонного индекса (S&P 500 по умолчанию)
+    stock = yf.Ticker(ticker)
+    benchmark_stock = yf.Ticker(benchmark)
+    
+    # Используем 5-летний период с месячными интервалами
+    stock_hist = stock.history(period="5y", interval="1mo")
+    benchmark_hist = benchmark_stock.history(period="5y", interval="1mo")
+    
+    if len(stock_hist) < 12 or len(benchmark_hist) < 12:
+        raise Exception("Недостаточно данных для расчета бета-коэффициента (5y monthly)")
+    
+    # Определяем, какой столбец использовать для цен
+    stock_price_col = "Adj Close" if "Adj Close" in stock_hist.columns else "Close"
+    benchmark_price_col = "Adj Close" if "Adj Close" in benchmark_hist.columns else "Close"
+    
+    # Рассчитываем доходности
+    stock_returns = stock_hist[stock_price_col].pct_change().dropna()
+    benchmark_returns = benchmark_hist[benchmark_price_col].pct_change().dropna()
+    
+    # Выравниваем данные по датам
+    aligned_data = stock_returns.align(benchmark_returns, join='inner')
+    stock_returns_aligned = aligned_data[0]
+    benchmark_returns_aligned = aligned_data[1]
+    
+    # Рассчитываем бета-коэффициент
+    covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned)[0][1]
+    benchmark_variance = np.var(benchmark_returns_aligned)
+    
+    if benchmark_variance == 0:
+        raise Exception("Дисперсия эталонного индекса равна нулю")
+    
+    beta = covariance / benchmark_variance
+    return beta, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
 # --- Расчет CAGR (Compound Annual Growth Rate) ---
 def calculate_cagr(ticker, period="5y"):
@@ -293,6 +323,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     await query.answer()
 
+    # Кэшируем имя пользователя
+    user_name = query.from_user.username
+    if user_name:
+        user_names_cache[user_id] = user_name
+
     if user_id not in TRUSTED_USERS:
         await query.edit_message_text("⛔ Нет доступа.")
         return
@@ -327,9 +362,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = user_names_cache.get(uid, f"User_{uid}")
                 # Добавляем @ перед username
                 if not user_name.startswith("User_"):
-                    user_name = f"@{user_name}"
+                    display_name = f"@{user_name}"
+                else:
+                    display_name = user_name
                 # Добавляем имя пользователя
-                all_assets_lines.append(f"👤 {user_name}:")
+                all_assets_lines.append(f"👤 {display_name}:")
                 # Добавляем активы пользователя
                 for asset in assets:
                     comment = comments.get(asset, asset)
