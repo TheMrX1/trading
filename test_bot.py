@@ -424,6 +424,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "heatmap":
         try:
+            # Отправляем сообщение о том, что нужно подождать
+            await query.message.reply_text("Подождите немного, пожалуйста. Так же, пожалуйста, не используйте эту функцию часто")
+            
             # Генерируем данные для тепловой карты
             heatmap_data = generate_heatmap_data(user_id)
             
@@ -1067,33 +1070,36 @@ def create_heatmap_image(heatmap_data):
     if not etf_tickers and not regular_tickers:
         raise Exception("Нет активов для создания тепловой карты")
     
-    # Определяем метрики (берем из первого актива)
-    metrics = list(heatmap_data[tickers[0]].keys())
-    
-    # Создаем тепловую карту с двумя секторами
+    # Создаем тепловую карту с двумя секторами, показывая только тикер и изменение в процентах
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     fig.suptitle("Тепловая карта активов", fontsize=16)
     
-    # Создаем матрицу данных для ETF
+    # Создаем матрицу данных для ETF (только изменение в процентах)
     if etf_tickers:
         etf_data_matrix = []
+        etf_labels = []
         for ticker in etf_tickers:
-            row = []
-            for metric in metrics:
-                value = heatmap_data[ticker].get(metric, None)
-                row.append(value if value is not None else np.nan)
-            etf_data_matrix.append(row)
+            # Получаем изменение в процентах
+            change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
+            etf_data_matrix.append([change_percent])
+            # Создаем метку с тикером и изменением
+            if change_percent is not None and not np.isnan(change_percent):
+                label = f"{ticker}\n{change_percent:.2f}%"
+            else:
+                label = f"{ticker}\nN/A"
+            etf_labels.append(label)
         
         etf_data_array = np.array(etf_data_matrix, dtype=float)
         
+        # Создаем тепловую карту только с одним столбцом
         sns.heatmap(etf_data_array, 
-                    xticklabels=metrics, 
-                    yticklabels=etf_tickers, 
+                    xticklabels=["Изменение за день"], 
+                    yticklabels=etf_labels, 
                     annot=True, 
-                    fmt=".2f", 
+                    fmt="",  # Пустой формат, так как мы уже создали метки
                     cmap="RdYlGn", 
                     center=0,
-                    cbar_kws={'label': 'Значения метрик'},
+                    cbar_kws={'label': 'Процент изменения'},
                     ax=ax1)
         ax1.set_title("ETF Фонды")
         ax1.tick_params(axis='x', rotation=45)
@@ -1102,26 +1108,32 @@ def create_heatmap_image(heatmap_data):
         ax1.text(0.5, 0.5, 'Нет ETF активов', ha='center', va='center', transform=ax1.transAxes)
         ax1.set_title("ETF Фонды")
     
-    # Создаем матрицу данных для обычных активов
+    # Создаем матрицу данных для обычных активов (только изменение в процентах)
     if regular_tickers:
         regular_data_matrix = []
+        regular_labels = []
         for ticker in regular_tickers:
-            row = []
-            for metric in metrics:
-                value = heatmap_data[ticker].get(metric, None)
-                row.append(value if value is not None else np.nan)
-            regular_data_matrix.append(row)
+            # Получаем изменение в процентах
+            change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
+            regular_data_matrix.append([change_percent])
+            # Создаем метку с тикером и изменением
+            if change_percent is not None and not np.isnan(change_percent):
+                label = f"{ticker}\n{change_percent:.2f}%"
+            else:
+                label = f"{ticker}\nN/A"
+            regular_labels.append(label)
         
         regular_data_array = np.array(regular_data_matrix, dtype=float)
         
+        # Создаем тепловую карту только с одним столбцом
         sns.heatmap(regular_data_array, 
-                    xticklabels=metrics, 
-                    yticklabels=regular_tickers, 
+                    xticklabels=["Изменение за день"], 
+                    yticklabels=regular_labels, 
                     annot=True, 
-                    fmt=".2f", 
+                    fmt="",  # Пустой формат, так как мы уже создали метки
                     cmap="RdYlGn", 
                     center=0,
-                    cbar_kws={'label': 'Значения метрик'},
+                    cbar_kws={'label': 'Процент изменения'},
                     ax=ax2)
         ax2.set_title("Обычные активы")
         ax2.tick_params(axis='x', rotation=45)
