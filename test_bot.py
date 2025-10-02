@@ -2,12 +2,15 @@ import logging
 import yfinance as yf
 import numpy as np
 import os
+import io
+import matplotlib.pyplot as plt
+import seaborn as sns
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
-)
+) 
 
 # 🔑 Токен и список доверенных пользователей
 load_dotenv()
@@ -51,7 +54,8 @@ def main_menu():
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
-         InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
+         InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")],
+        [InlineKeyboardButton("🌡️ Тепловая карта", callback_data="heatmap")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -417,6 +421,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
         await query.edit_message_text("\n".join(blacklist_lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "heatmap":
+        try:
+            # Генерируем данные для тепловой карты
+            heatmap_data = generate_heatmap_data(user_id)
+            
+            # Создаем изображение тепловой карты
+            heatmap_image = create_heatmap_image(heatmap_data)
+            
+            # Отправляем изображение пользователю
+            await query.message.reply_photo(photo=("heatmap.png", heatmap_image), caption="🌡️ Тепловая карта ваших активов")
+            await query.answer()
+        except Exception as e:
+            await query.answer(f"Ошибка при создании тепловой карты: {str(e)}", show_alert=True)
 
     elif query.data == "add_to_blacklist":
         user_states[user_id] = "waiting_for_blacklist_ticker"
@@ -919,6 +937,129 @@ def calculate_pe_ratio(ticker):
         return info["forwardPE"], f"https://finance.yahoo.com/quote/{ticker}/analysis"
     else:
         raise Exception("P/E данные недоступны для этого актива")
+
+# --- Генерация тепловой карты для активов пользователя ---
+def generate_heatmap_data(user_id):
+    """Генерирует данные для тепловой карты на основе активов пользователя"""
+    assets = user_assets.get(user_id, [])
+    if not assets:
+        raise Exception("У вас нет активов для создания тепловой карты")
+    
+    # Собираем данные по всем активам пользователя
+    heatmap_data = {}
+    
+    for ticker in assets:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # Получаем различные метрики
+            metrics = {}
+            
+            # Цена
+            if "currentPrice" in info:
+                metrics["Цена"] = info["currentPrice"]
+            elif "previousClose" in info:
+                metrics["Цена"] = info["previousClose"]
+            else:
+                metrics["Цена"] = None
+                
+            # Изменение за день в процентах
+            if "regularMarketChangePercent" in info:
+                metrics["Изменение %"] = info["regularMarketChangePercent"]
+            else:
+                metrics["Изменение %"] = None
+                
+            # Объем
+            if "volume" in info:
+                metrics["Объем"] = info["volume"]
+            else:
+                metrics["Объем"] = None
+                
+            # Рыночная капитализация
+            if "marketCap" in info:
+                metrics["Капитализация"] = info["marketCap"]
+            else:
+                metrics["Капитализация"] = None
+                
+            # P/E Ratio
+            if "trailingPE" in info:
+                metrics["P/E"] = info["trailingPE"]
+            elif "forwardPE" in info:
+                metrics["P/E"] = info["forwardPE"]
+            else:
+                metrics["P/E"] = None
+                
+            # Дивидендная доходность
+            if "dividendYield" in info:
+                metrics["Дивиденды %"] = info["dividendYield"] * 100 if info["dividendYield"] else None
+            else:
+                metrics["Дивиденды %"] = None
+                
+            # Бета
+            if "beta" in info:
+                metrics["Бета"] = info["beta"]
+            else:
+                metrics["Бета"] = None
+                
+            heatmap_data[ticker] = metrics
+            
+        except Exception as e:
+            # Если не удалось получить данные по активу, пропускаем его
+            logging.warning(f"Не удалось получить данные для {ticker}: {e}")
+            continue
+    
+    if not heatmap_data:
+        raise Exception("Не удалось получить данные ни для одного актива")
+        
+    return heatmap_data
+
+def create_heatmap_image(heatmap_data):
+    """Создает изображение тепловой карты на основе данных"""
+    # Преобразуем данные в формат, подходящий для тепловой карты
+    tickers = list(heatmap_data.keys())
+    
+    if not tickers:
+        raise Exception("Нет данных для создания тепловой карты")
+    
+    # Определяем метрики (берем из первого актива)
+    metrics = list(heatmap_data[tickers[0]].keys())
+    
+    # Создаем матрицу данных
+    data_matrix = []
+    for ticker in tickers:
+        row = []
+        for metric in metrics:
+            value = heatmap_data[ticker].get(metric, None)
+            row.append(value if value is not None else np.nan)
+        data_matrix.append(row)
+    
+    # Преобразуем в numpy массив
+    data_array = np.array(data_matrix, dtype=float)
+    
+    # Создаем тепловую карту
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(data_array, 
+                xticklabels=metrics, 
+                yticklabels=tickers, 
+                annot=True, 
+                fmt=".2f", 
+                cmap="RdYlGn", 
+                center=0,
+                cbar_kws={'label': 'Значения метрик'})
+    
+    plt.title("Тепловая карта активов")
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    
+    # Сохраняем изображение в буфер
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    return buf
 
 # --- Запуск бота ---
 def main():
