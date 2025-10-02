@@ -427,6 +427,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Генерируем данные для тепловой карты
             heatmap_data = generate_heatmap_data(user_id)
             
+            # Проверяем, что данные получены
+            if not heatmap_data:
+                raise Exception("Не удалось получить данные для создания тепловой карты")
+            
+            # Проверяем, что есть хотя бы один актив с данными
+            if len(heatmap_data) == 0:
+                raise Exception("Нет активов с доступными данными для создания тепловой карты")
+            
             # Создаем изображение тепловой карты
             heatmap_image = create_heatmap_image(heatmap_data)
             
@@ -1071,10 +1079,6 @@ def create_heatmap_image(heatmap_data):
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
     plt.close()
-    
-    # Проверяем, что буфер не пуст
-    if buf.tell() == 0:
-        raise Exception("Не удалось создать изображение тепловой карты")
     
     return buf
 
