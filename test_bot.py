@@ -1070,19 +1070,19 @@ def create_heatmap_image(heatmap_data):
     if not etf_tickers and not regular_tickers:
         raise Exception("Нет активов для создания тепловой карты")
     
-    # Создаем тепловую карту с двумя секторами, показывая только тикер и изменение в процентах
+    # Создаем тепловую карту с двумя секторами
     # Определяем размер фигуры в зависимости от количества активов
     etf_count = len(etf_tickers) if etf_tickers else 0
     regular_count = len(regular_tickers) if regular_tickers else 0
     
     # Минимальный размер для каждой секции
-    etf_fig_height = max(4, etf_count * 0.5)
-    regular_fig_height = max(4, regular_count * 0.5)
+    etf_fig_height = max(4, etf_count * 0.6)
+    regular_fig_height = max(4, regular_count * 0.6)
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, etf_fig_height + regular_fig_height))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, etf_fig_height + regular_fig_height))
     fig.suptitle("Тепловая карта активов", fontsize=16)
     
-    # Создаем матрицу данных для ETF (только изменение в процентах)
+    # Создаем матрицу данных для ETF
     if etf_tickers:
         etf_data_matrix = []
         etf_labels = []
@@ -1090,7 +1090,7 @@ def create_heatmap_image(heatmap_data):
             # Получаем изменение в процентах
             change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
             etf_data_matrix.append([change_percent])
-            # Создаем метку с тикером и изменением
+            # Создаем метку с тикером и изменением внутри ячейки
             if change_percent is not None and not np.isnan(change_percent):
                 label = f"{ticker}\n{change_percent:.2f}%"
             else:
@@ -1099,25 +1099,25 @@ def create_heatmap_image(heatmap_data):
         
         etf_data_array = np.array(etf_data_matrix, dtype=float)
         
-        # Создаем тепловую карту только с одним столбцом без подписей
-        sns.heatmap(etf_data_array, 
-                    xticklabels=[], 
-                    yticklabels=etf_labels, 
-                    annot=True, 
-                    fmt="",  # Пустой формат, так как мы уже создали метки
-                    cmap="RdYlGn", 
-                    center=0,
-                    cbar=False,  # Убираем цветовую шкалу
-                    ax=ax1,
-                    linewidths=0.5)
+        # Создаем тепловую карту только с одним столбцом
+        im1 = ax1.imshow(etf_data_array, cmap="RdYlGn", aspect="auto", vmin=-5, vmax=5)
+        
+        # Убираем деления осей
+        ax1.set_xticks([])
+        ax1.set_yticks(range(len(etf_labels)))
+        ax1.set_yticklabels(etf_labels)
+        
+        # Добавляем значения в ячейки
+        for i in range(len(etf_labels)):
+            text = ax1.text(0, i, etf_labels[i],
+                           ha="center", va="center", color="black", fontsize=10)
+        
         ax1.set_title("ETF Фонды")
-        ax1.tick_params(axis='x', rotation=45)
-        ax1.tick_params(axis='y', rotation=0)
     else:
         ax1.text(0.5, 0.5, 'Нет ETF активов', ha='center', va='center', transform=ax1.transAxes)
         ax1.set_title("ETF Фонды")
     
-    # Создаем матрицу данных для обычных активов (только изменение в процентах)
+    # Создаем матрицу данных для обычных активов
     if regular_tickers:
         regular_data_matrix = []
         regular_labels = []
@@ -1125,7 +1125,7 @@ def create_heatmap_image(heatmap_data):
             # Получаем изменение в процентах
             change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
             regular_data_matrix.append([change_percent])
-            # Создаем метку с тикером и изменением
+            # Создаем метку с тикером и изменением внутри ячейки
             if change_percent is not None and not np.isnan(change_percent):
                 label = f"{ticker}\n{change_percent:.2f}%"
             else:
@@ -1134,20 +1134,20 @@ def create_heatmap_image(heatmap_data):
         
         regular_data_array = np.array(regular_data_matrix, dtype=float)
         
-        # Создаем тепловую карту только с одним столбцом без подписей
-        sns.heatmap(regular_data_array, 
-                    xticklabels=[], 
-                    yticklabels=regular_labels, 
-                    annot=True, 
-                    fmt="",  # Пустой формат, так как мы уже создали метки
-                    cmap="RdYlGn", 
-                    center=0,
-                    cbar=False,  # Убираем цветовую шкалу
-                    ax=ax2,
-                    linewidths=0.5)
+        # Создаем тепловую карту только с одним столбцом
+        im2 = ax2.imshow(regular_data_array, cmap="RdYlGn", aspect="auto", vmin=-5, vmax=5)
+        
+        # Убираем деления осей
+        ax2.set_xticks([])
+        ax2.set_yticks(range(len(regular_labels)))
+        ax2.set_yticklabels(regular_labels)
+        
+        # Добавляем значения в ячейки
+        for i in range(len(regular_labels)):
+            text = ax2.text(0, i, regular_labels[i],
+                           ha="center", va="center", color="black", fontsize=10)
+        
         ax2.set_title("Обычные активы")
-        ax2.tick_params(axis='x', rotation=45)
-        ax2.tick_params(axis='y', rotation=0)
     else:
         ax2.text(0.5, 0.5, 'Нет обычных активов', ha='center', va='center', transform=ax2.transAxes)
         ax2.set_title("Обычные активы")
