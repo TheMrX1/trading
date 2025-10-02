@@ -1027,43 +1027,109 @@ def generate_heatmap_data(user_id):
         
     return heatmap_data
 
+def is_etf(ticker):
+    """Определяет, является ли актив ETF фондом"""
+    # Простая проверка по суффиксу тикера
+    etf_suffixes = ['.MX', '.ME']  # Московская биржа
+    etf_keywords = ['etf', 'траф', 'инвес', 'фонд']
+    
+    # Проверяем суффиксы
+    for suffix in etf_suffixes:
+        if ticker.upper().endswith(suffix):
+            return True
+    
+    # Проверяем ключевые слова в тикере
+    ticker_lower = ticker.lower()
+    for keyword in etf_keywords:
+        if keyword in ticker_lower:
+            return True
+    
+    # Для популярных ETF
+    popular_etfs = ['SPY', 'QQQ', 'IWM', 'EEM', 'EFA', 'VTI', 'VOO', 'VEA', 'VWO']
+    if ticker.upper() in popular_etfs:
+        return True
+        
+    return False
+
 def create_heatmap_image(heatmap_data):
-    """Создает изображение тепловой карты на основе данных"""
+    """Создает изображение тепловой карты на основе данных, разделенных на ETF и обычные активы"""
     # Преобразуем данные в формат, подходящий для тепловой карты
     tickers = list(heatmap_data.keys())
     
     if not tickers:
         raise Exception("Нет данных для создания тепловой карты")
     
+    # Разделяем активы на ETF и обычные
+    etf_tickers = [ticker for ticker in tickers if is_etf(ticker)]
+    regular_tickers = [ticker for ticker in tickers if not is_etf(ticker)]
+    
+    # Если нет ETF или обычных активов, создаем пустые списки
+    if not etf_tickers and not regular_tickers:
+        raise Exception("Нет активов для создания тепловой карты")
+    
     # Определяем метрики (берем из первого актива)
     metrics = list(heatmap_data[tickers[0]].keys())
     
-    # Создаем матрицу данных
-    data_matrix = []
-    for ticker in tickers:
-        row = []
-        for metric in metrics:
-            value = heatmap_data[ticker].get(metric, None)
-            row.append(value if value is not None else np.nan)
-        data_matrix.append(row)
+    # Создаем тепловую карту с двумя секторами
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    fig.suptitle("Тепловая карта активов", fontsize=16)
     
-    # Преобразуем в numpy массив
-    data_array = np.array(data_matrix, dtype=float)
+    # Создаем матрицу данных для ETF
+    if etf_tickers:
+        etf_data_matrix = []
+        for ticker in etf_tickers:
+            row = []
+            for metric in metrics:
+                value = heatmap_data[ticker].get(metric, None)
+                row.append(value if value is not None else np.nan)
+            etf_data_matrix.append(row)
+        
+        etf_data_array = np.array(etf_data_matrix, dtype=float)
+        
+        sns.heatmap(etf_data_array, 
+                    xticklabels=metrics, 
+                    yticklabels=etf_tickers, 
+                    annot=True, 
+                    fmt=".2f", 
+                    cmap="RdYlGn", 
+                    center=0,
+                    cbar_kws={'label': 'Значения метрик'},
+                    ax=ax1)
+        ax1.set_title("ETF Фонды")
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.tick_params(axis='y', rotation=0)
+    else:
+        ax1.text(0.5, 0.5, 'Нет ETF активов', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title("ETF Фонды")
     
-    # Создаем тепловую карту
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(data_array, 
-                xticklabels=metrics, 
-                yticklabels=tickers, 
-                annot=True, 
-                fmt=".2f", 
-                cmap="RdYlGn", 
-                center=0,
-                cbar_kws={'label': 'Значения метрик'})
+    # Создаем матрицу данных для обычных активов
+    if regular_tickers:
+        regular_data_matrix = []
+        for ticker in regular_tickers:
+            row = []
+            for metric in metrics:
+                value = heatmap_data[ticker].get(metric, None)
+                row.append(value if value is not None else np.nan)
+            regular_data_matrix.append(row)
+        
+        regular_data_array = np.array(regular_data_matrix, dtype=float)
+        
+        sns.heatmap(regular_data_array, 
+                    xticklabels=metrics, 
+                    yticklabels=regular_tickers, 
+                    annot=True, 
+                    fmt=".2f", 
+                    cmap="RdYlGn", 
+                    center=0,
+                    cbar_kws={'label': 'Значения метрик'},
+                    ax=ax2)
+        ax2.set_title("Обычные активы")
+        ax2.tick_params(axis='x', rotation=45)
+        ax2.tick_params(axis='y', rotation=0)
+    else:
+        ax2.text(0.5, 0.5, 'Нет обычных активов', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title("Обычные активы")
     
-    plt.title("Тепловая карта активов")
-    plt.xticks(rotation=45, ha="right")
-    plt.yticks(rotation=0)
     plt.tight_layout()
     
     # Сохраняем изображение в буфер
