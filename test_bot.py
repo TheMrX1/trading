@@ -1071,7 +1071,15 @@ def create_heatmap_image(heatmap_data):
         raise Exception("Нет активов для создания тепловой карты")
     
     # Создаем тепловую карту с двумя секторами, показывая только тикер и изменение в процентах
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    # Определяем размер фигуры в зависимости от количества активов
+    etf_count = len(etf_tickers) if etf_tickers else 0
+    regular_count = len(regular_tickers) if regular_tickers else 0
+    
+    # Минимальный размер для каждой секции
+    etf_fig_height = max(4, etf_count * 0.5)
+    regular_fig_height = max(4, regular_count * 0.5)
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, etf_fig_height + regular_fig_height))
     fig.suptitle("Тепловая карта активов", fontsize=16)
     
     # Создаем матрицу данных для ETF (только изменение в процентах)
@@ -1091,16 +1099,17 @@ def create_heatmap_image(heatmap_data):
         
         etf_data_array = np.array(etf_data_matrix, dtype=float)
         
-        # Создаем тепловую карту только с одним столбцом
+        # Создаем тепловую карту только с одним столбцом без подписей
         sns.heatmap(etf_data_array, 
-                    xticklabels=["Изменение за день"], 
+                    xticklabels=[], 
                     yticklabels=etf_labels, 
                     annot=True, 
                     fmt="",  # Пустой формат, так как мы уже создали метки
                     cmap="RdYlGn", 
                     center=0,
-                    cbar_kws={'label': 'Процент изменения'},
-                    ax=ax1)
+                    cbar=False,  # Убираем цветовую шкалу
+                    ax=ax1,
+                    linewidths=0.5)
         ax1.set_title("ETF Фонды")
         ax1.tick_params(axis='x', rotation=45)
         ax1.tick_params(axis='y', rotation=0)
@@ -1125,16 +1134,17 @@ def create_heatmap_image(heatmap_data):
         
         regular_data_array = np.array(regular_data_matrix, dtype=float)
         
-        # Создаем тепловую карту только с одним столбцом
+        # Создаем тепловую карту только с одним столбцом без подписей
         sns.heatmap(regular_data_array, 
-                    xticklabels=["Изменение за день"], 
+                    xticklabels=[], 
                     yticklabels=regular_labels, 
                     annot=True, 
                     fmt="",  # Пустой формат, так как мы уже создали метки
                     cmap="RdYlGn", 
                     center=0,
-                    cbar_kws={'label': 'Процент изменения'},
-                    ax=ax2)
+                    cbar=False,  # Убираем цветовую шкалу
+                    ax=ax2,
+                    linewidths=0.5)
         ax2.set_title("Обычные активы")
         ax2.tick_params(axis='x', rotation=45)
         ax2.tick_params(axis='y', rotation=0)
