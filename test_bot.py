@@ -442,16 +442,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if heatmap_image is None:
                 raise Exception("Не удалось создать изображение тепловой карты")
             
-            # Проверяем размер изображения
-            heatmap_image.seek(0, 2)  # Перемещаемся в конец файла
-            size = heatmap_image.tell()
-            heatmap_image.seek(0)  # Возвращаемся в начало
-            
-            if size == 0:
-                raise Exception("Создано пустое изображение тепловой карты")
-            
-            # Отправляем изображение пользователю
-            await query.message.reply_photo(photo=("heatmap.png", heatmap_image), caption="🌡️ Тепловая карта ваших активов")
+            # Отправляем изображение пользователю как документ
+            await query.message.reply_document(document=heatmap_image, filename="heatmap.png", caption="🌡️ Тепловая карта ваших активов")
             await query.answer()
         except Exception as e:
             logger.error(f"Ошибка при создании тепловой карты: {str(e)}")
