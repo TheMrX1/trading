@@ -2,17 +2,14 @@ import logging
 import yfinance as yf
 import numpy as np
 import os
-import io
-import matplotlib.pyplot as plt
-import seaborn as sns
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
-) 
+)
 
-# 🔑 Токен и список доверенных пользователей!
+# 🔑 Токен и список доверенных пользователей
 load_dotenv()
 BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
 if not BOT_TOKEN:
@@ -54,8 +51,7 @@ def main_menu():
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
-         InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")],
-        [InlineKeyboardButton("🌡️ Тепловая карта", callback_data="heatmap")]
+         InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -422,36 +418,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("\n".join(blacklist_lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data == "heatmap":
-        try:
-            # Отправляем сообщение о том, что нужно подождать
-            await query.message.reply_text("Подождите немного, пожалуйста. Так же, пожалуйста, не используйте эту функцию часто")
-            
-            # Генерируем данные для тепловой карты
-            heatmap_data = generate_heatmap_data(user_id)
-            
-            # Проверяем, что данные получены
-            if not heatmap_data:
-                raise Exception("Не удалось получить данные для создания тепловой карты")
-            
-            # Проверяем, что есть хотя бы один актив с данными
-            if len(heatmap_data) == 0:
-                raise Exception("Нет активов с доступными данными для создания тепловой карты")
-            
-            # Создаем изображение тепловой карты
-            heatmap_image = create_heatmap_image(heatmap_data)
-            
-            # Проверяем, что изображение создано
-            if heatmap_image is None:
-                raise Exception("Не удалось создать изображение тепловой карты")
-            
-            # Отправляем изображение пользователю как документ
-            await query.message.reply_document(document=heatmap_image, filename="heatmap.png", caption="🌡️ Тепловая карта ваших активов")
-            await query.answer()
-        except Exception as e:
-            logger.error(f"Ошибка при создании тепловой карты: {str(e)}")
-            await query.answer(f"Ошибка при создании тепловой карты: {str(e)}", show_alert=True)
-
     elif query.data == "add_to_blacklist":
         user_states[user_id] = "waiting_for_blacklist_ticker"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="blacklist")]]
@@ -514,7 +480,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
             [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
-            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}")],
+            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}"),
+             InlineKeyboardButton("DCF", callback_data=f"dcf_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -608,6 +575,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+
+    elif query.data.startswith("dcf_"):
+        ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        try:
+            message_text = await calculate_dcf(ticker, comment)
+            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка при расчете DCF для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -954,213 +930,117 @@ def calculate_pe_ratio(ticker):
     else:
         raise Exception("P/E данные недоступны для этого актива")
 
-# --- Генерация тепловой карты для активов пользователя ---
-def generate_heatmap_data(user_id):
-    """Генерирует данные для тепловой карты на основе активов пользователя"""
-    assets = user_assets.get(user_id, [])
-    if not assets:
-        raise Exception("У вас нет активов для создания тепловой карты")
-    
-    # Собираем данные по всем активам пользователя
-    heatmap_data = {}
-    
-    for ticker in assets:
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
+# --- Расчет DCF (Discounted Cash Flow) ---
+async def calculate_dcf(ticker, comment):
+    """
+    Calculate Discounted Cash Flow model for stock valuation
+    """
+    try:
+        # Получаем данные акции
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        hist = stock.history(period="5y")
+        
+        # Проверяем, есть ли данные
+        if hist.empty:
+            raise Exception("Недостаточно исторических данных")
+        
+        # Используем Adj Close если доступно, иначе Close
+        price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+        
+        # Текущая цена
+        current_price = hist[price_column].iloc[-1]
+        
+        # Получаем дивиденды
+        dividends = stock.dividends
+        latest_dividend = dividends.iloc[-1] if not dividends.empty else 0
+        
+        # Получаем EPS (Earnings Per Share)
+        eps = info.get("trailingEps", 0)
+        if eps is None:
+            eps = 0
             
-            # Получаем различные метрики
-            metrics = {}
+        # Получаем бета-коэффициент
+        beta = info.get("beta", 1.0)
+        if beta is None:
+            beta = 1.0
             
-            # Цена
-            if "currentPrice" in info:
-                metrics["Цена"] = info["currentPrice"]
-            elif "previousClose" in info:
-                metrics["Цена"] = info["previousClose"]
-            else:
-                metrics["Цена"] = None
-                
-            # Изменение за день в процентах
-            if "regularMarketChangePercent" in info:
-                metrics["Изменение %"] = info["regularMarketChangePercent"]
-            else:
-                metrics["Изменение %"] = None
-                
-            # Объем
-            if "volume" in info:
-                metrics["Объем"] = info["volume"]
-            else:
-                metrics["Объем"] = None
-                
-            # Рыночная капитализация
-            if "marketCap" in info:
-                metrics["Капитализация"] = info["marketCap"]
-            else:
-                metrics["Капитализация"] = None
-                
-            # P/E Ratio
-            if "trailingPE" in info:
-                metrics["P/E"] = info["trailingPE"]
-            elif "forwardPE" in info:
-                metrics["P/E"] = info["forwardPE"]
-            else:
-                metrics["P/E"] = None
-                
-            # Дивидендная доходность
-            if "dividendYield" in info:
-                metrics["Дивиденды %"] = info["dividendYield"] * 100 if info["dividendYield"] else None
-            else:
-                metrics["Дивиденды %"] = None
-                
-            # Бета
-            if "beta" in info:
-                metrics["Бета"] = info["beta"]
-            else:
-                metrics["Бета"] = None
-                
-            heatmap_data[ticker] = metrics
+        # Параметры для модели CAPM
+        risk_free_rate = 0.04  # 4% безрисковая ставка (можно адаптировать)
+        market_risk_premium = 0.055  # 5.5% премия за рыночный риск (можно адаптировать)
+        
+        # Рассчитываем стоимость капитала по CAPM
+        cost_of_equity = risk_free_rate + beta * market_risk_premium
+        
+        # Определяем темпы роста (можно использовать исторические данные или оценки аналитиков)
+        # Для простоты используем фиксированные значения, но в реальном приложении их нужно рассчитывать
+        short_term_growth = 0.08  # 8% на первый год
+        medium_term_growth = 0.05  # 5% на следующие несколько лет
+        long_term_growth = 0.03   # 3% в долгосрочной перспективе
+        
+        # Рассчитываем прогнозируемые денежные потоки
+        # Используем дивиденды как приближение денежных потоков для акционеров
+        if latest_dividend > 0:
+            # Если есть дивиденды, используем их
+            base_cf = latest_dividend
+        elif eps > 0:
+            # Если нет дивидендов, используем EPS как приближение
+            base_cf = eps * 0.5  # Предполагаем, что 50% прибыли возвращается акционерам
+        else:
+            # Если нет данных, используем небольшую часть текущей цены
+            base_cf = current_price * 0.02
             
-        except Exception as e:
-            # Если не удалось получить данные по активу, пропускаем его
-            logging.warning(f"Не удалось получить данные для {ticker}: {e}")
-            continue
-    
-    if not heatmap_data:
-        raise Exception("Не удалось получить данные ни для одного актива")
+        # Прогноз на 1 месяц (упрощенный)
+        cf_1m = base_cf * (1 + short_term_growth / 12)
+        pv_1m = cf_1m / ((1 + cost_of_equity / 12) ** 1)
         
-    return heatmap_data
-
-def is_etf(ticker):
-    """Определяет, является ли актив ETF фондом"""
-    # Простая проверка по суффиксу тикера
-    etf_suffixes = ['.MX', '.ME']  # Московская биржа
-    etf_keywords = ['etf', 'траф', 'инвес', 'фонд']
-    
-    # Проверяем суффиксы
-    for suffix in etf_suffixes:
-        if ticker.upper().endswith(suffix):
-            return True
-    
-    # Проверяем ключевые слова в тикере
-    ticker_lower = ticker.lower()
-    for keyword in etf_keywords:
-        if keyword in ticker_lower:
-            return True
-    
-    # Для популярных ETF
-    popular_etfs = ['SPY', 'QQQ', 'IWM', 'EEM', 'EFA', 'VTI', 'VOO', 'VEA', 'VWO']
-    if ticker.upper() in popular_etfs:
-        return True
+        # Прогноз на 1 год
+        cf_1y = base_cf * (1 + short_term_growth)
+        pv_1y = cf_1y / ((1 + cost_of_equity) ** 1)
         
-    return False
-
-def create_heatmap_image(heatmap_data):
-    """Создает изображение тепловой карты на основе данных, разделенных на ETF и обычные активы"""
-    # Преобразуем данные в формат, подходящий для тепловой карты
-    tickers = list(heatmap_data.keys())
-    
-    if not tickers:
-        raise Exception("Нет данных для создания тепловой карты")
-    
-    # Разделяем активы на ETF и обычные
-    etf_tickers = [ticker for ticker in tickers if is_etf(ticker)]
-    regular_tickers = [ticker for ticker in tickers if not is_etf(ticker)]
-    
-    # Если нет ETF или обычных активов, создаем пустые списки
-    if not etf_tickers and not regular_tickers:
-        raise Exception("Нет активов для создания тепловой карты")
-    
-    # Создаем тепловую карту с двумя секторами
-    # Определяем размер фигуры в зависимости от количества активов
-    etf_count = len(etf_tickers) if etf_tickers else 0
-    regular_count = len(regular_tickers) if regular_tickers else 0
-    
-    # Минимальный размер для каждой секции
-    etf_fig_height = max(4, etf_count * 0.6)
-    regular_fig_height = max(4, regular_count * 0.6)
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, etf_fig_height + regular_fig_height))
-    fig.suptitle("Тепловая карта активов", fontsize=16)
-    
-    # Создаем матрицу данных для ETF
-    if etf_tickers:
-        etf_data_matrix = []
-        etf_labels = []
-        for ticker in etf_tickers:
-            # Получаем изменение в процентах
-            change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
-            etf_data_matrix.append([change_percent])
-            # Создаем метку с тикером и изменением внутри ячейки
-            if change_percent is not None and not np.isnan(change_percent):
-                label = f"{ticker}\n{change_percent:.2f}%"
+        # Прогноз на 5 лет (с учетом изменения темпов роста)
+        pv_5y = 0
+        cumulative_cf = base_cf
+        for year in range(1, 6):
+            if year <= 2:
+                growth_rate = short_term_growth
+            elif year <= 4:
+                growth_rate = medium_term_growth
             else:
-                label = f"{ticker}\nN/A"
-            etf_labels.append(label)
+                growth_rate = long_term_growth
+                
+            cumulative_cf = cumulative_cf * (1 + growth_rate)
+            pv = cumulative_cf / ((1 + cost_of_equity) ** year)
+            pv_5y += pv
         
-        etf_data_array = np.array(etf_data_matrix, dtype=float)
+        # Формируем сообщение с результатами
+        message_text = f"🧮 DCF модель для {comment} ({ticker}):\n\n"
+        message_text += f"📊 Входные данные:\n"
+        message_text += f"  • Текущая цена: ${current_price:.2f}\n"
+        message_text += f"  • EPS: ${eps:.2f}\n"
+        message_text += f"  • Дивиденды: ${latest_dividend:.2f}\n"
+        message_text += f"  • Бета: {beta:.2f}\n\n"
         
-        # Создаем тепловую карту только с одним столбцом
-        im1 = ax1.imshow(etf_data_array, cmap="RdYlGn", aspect="auto", vmin=-5, vmax=5)
+        message_text += f"📈 Расчет ставки дисконтирования (CAPM):\n"
+        message_text += f"  • Безрисковая ставка: {risk_free_rate*100:.1f}%\n"
+        message_text += f"  • Премия за рыночный риск: {market_risk_premium*100:.1f}%\n"
+        message_text += f"  • Стоимость капитала: {cost_of_equity*100:.2f}%\n\n"
         
-        # Убираем деления осей
-        ax1.set_xticks([])
-        ax1.set_yticks(range(len(etf_labels)))
-        ax1.set_yticklabels(etf_labels)
+        message_text += f"💰 Прогноз денежных потоков:\n"
+        message_text += f"  • 1 месяц: ${cf_1m:.4f}\n"
+        message_text += f"  • 1 год: ${cf_1y:.2f}\n"
+        message_text += f"  • 5 лет: кумулятивно ${cumulative_cf:.2f}\n\n"
         
-        # Добавляем значения в ячейки
-        for i in range(len(etf_labels)):
-            text = ax1.text(0, i, etf_labels[i],
-                           ha="center", va="center", color="black", fontsize=10)
+        message_text += f"📉 Текущая стоимость:\n"
+        message_text += f"  • 1 месяц: ${pv_1m:.2f}\n"
+        message_text += f"  • 1 год: ${pv_1y:.2f}\n"
+        message_text += f"  • 5 лет: ${pv_5y:.2f}\n\n"
         
-        ax1.set_title("ETF Фонды")
-    else:
-        ax1.text(0.5, 0.5, 'Нет ETF активов', ha='center', va='center', transform=ax1.transAxes)
-        ax1.set_title("ETF Фонды")
-    
-    # Создаем матрицу данных для обычных активов
-    if regular_tickers:
-        regular_data_matrix = []
-        regular_labels = []
-        for ticker in regular_tickers:
-            # Получаем изменение в процентах
-            change_percent = heatmap_data[ticker].get("Изменение %", np.nan)
-            regular_data_matrix.append([change_percent])
-            # Создаем метку с тикером и изменением внутри ячейки
-            if change_percent is not None and not np.isnan(change_percent):
-                label = f"{ticker}\n{change_percent:.2f}%"
-            else:
-                label = f"{ticker}\nN/A"
-            regular_labels.append(label)
+        message_text += f"📊 Источник данных: https://finance.yahoo.com/quote/{ticker}"
         
-        regular_data_array = np.array(regular_data_matrix, dtype=float)
-        
-        # Создаем тепловую карту только с одним столбцом
-        im2 = ax2.imshow(regular_data_array, cmap="RdYlGn", aspect="auto", vmin=-5, vmax=5)
-        
-        # Убираем деления осей
-        ax2.set_xticks([])
-        ax2.set_yticks(range(len(regular_labels)))
-        ax2.set_yticklabels(regular_labels)
-        
-        # Добавляем значения в ячейки
-        for i in range(len(regular_labels)):
-            text = ax2.text(0, i, regular_labels[i],
-                           ha="center", va="center", color="black", fontsize=10)
-        
-        ax2.set_title("Обычные активы")
-    else:
-        ax2.text(0.5, 0.5, 'Нет обычных активов', ha='center', va='center', transform=ax2.transAxes)
-        ax2.set_title("Обычные активы")
-    
-    plt.tight_layout()
-    
-    # Сохраняем изображение в буфер
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    
-    return buf
+        return message_text
+    except Exception as e:
+        raise Exception(f"Ошибка при расчете DCF: {str(e)}")
 
 # --- Запуск бота ---
 def main():
