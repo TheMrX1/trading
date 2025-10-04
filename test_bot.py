@@ -12,7 +12,7 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 ) 
 
-# 🔑 Токен и список доверенных пользователей
+# 🔑 Токен и список доверенных пользователей!
 load_dotenv()
 BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
 if not BOT_TOKEN:
