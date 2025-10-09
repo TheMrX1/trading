@@ -33,12 +33,39 @@ user_states = {}
 user_comments = {}
 user_settings = {}
 
+user_asset_names = {}
+
+ticker_name_cache = {}
+
 user_names_cache = {}
 
 blacklist = {}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def get_company_name(ticker):
+    ticker = ticker.upper()
+    if ticker in ticker_name_cache:
+        return ticker_name_cache[ticker]
+
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        name = info.get("shortName") or info.get("longName")
+        if not name:
+            fast_info = getattr(stock, "fast_info", {})
+            name = fast_info.get("shortName") if fast_info else None
+    except Exception as exc:
+        logger.debug(f"Не удалось получить название компании для {ticker}: {exc}")
+        name = None
+
+    if not name:
+        name = ticker
+
+    ticker_name_cache[ticker] = name
+    return name
 
 def main_menu():
     keyboard = [
@@ -65,8 +92,12 @@ async def show_assets_menu(query, user_id, page=0):
 
     keyboard = []
     for asset in page_assets:
-        comment = user_comments.get(user_id, {}).get(asset, asset)
-        keyboard.append([InlineKeyboardButton(comment, callback_data=f"asset_{asset}")])
+        name = user_asset_names.get(user_id, {}).get(asset)
+        if not name:
+            name = get_company_name(asset)
+            user_asset_names.setdefault(user_id, {})[asset] = name
+        display_text = name if name else asset
+        keyboard.append([InlineKeyboardButton(display_text, callback_data=f"asset_{asset}")])
 
     nav_buttons = []
     if page > 0:
@@ -89,7 +120,13 @@ def classify_cycle(df):
     close = df[price_column].iloc[-1]
     ema = df["EMA20"].iloc[-1]
     above = close > ema
-    near_flat_ema = abs(ema_slope) < (df[price_column].std() * 0.02 if df[price_column].std() else 0.0)
+    price_std = df[price_column].std()
+    flat_threshold = price_std * 0.02 if price_std and not np.isnan(price_std) else 0.0
+    if np.isnan(flat_threshold):
+        flat_threshold = 0.0
+    ema_abs = abs(ema) if not np.isnan(ema) else 0.0
+    flat_threshold = max(flat_threshold, max(ema_abs * 1e-4, 1e-6))
+    near_flat_ema = abs(ema_slope) <= flat_threshold
 
     delta = np.sign(df[price_column].diff().fillna(0))
     obv = (delta * df["Volume"]).fillna(0).cumsum()
@@ -97,7 +134,10 @@ def classify_cycle(df):
 
     window = df[price_column].tail(50)
     rng = (window.max() - window.min()) if len(window) > 0 else 0
-    in_range = (rng > 0) and (window.min() + 0.2 * rng < close < window.max() - 0.2 * rng)
+    if rng == 0:
+        in_range = True
+    else:
+        in_range = (window.min() + 0.2 * rng) < close < (window.max() - 0.2 * rng)
 
     if ema_slope > 0 and above and obv_slope > 0:
         return "Markup (рост)"
@@ -169,8 +209,8 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
     stock_returns_aligned = aligned_data[0]
     benchmark_returns_aligned = aligned_data[1]
     
-    covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned)[0][1]
-    benchmark_variance = np.var(benchmark_returns_aligned)
+    covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned, ddof=1)[0][1]
+    benchmark_variance = np.var(benchmark_returns_aligned, ddof=1)
     
     if benchmark_variance == 0:
         raise Exception("Дисперсия эталонного индекса равна нулю")
@@ -181,11 +221,29 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
 def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
     stock = yf.Ticker(ticker)
     info = stock.info
-    
-    if "beta" in info and info["beta"] is not None:
+    if info.get("beta") is not None:
         return info["beta"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
-    else:
-        return 1.11, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    hist = stock.history(period="5y", interval="1mo")
+    benchmark_hist = yf.Ticker(benchmark).history(period="5y", interval="1mo")
+
+    price_col_stock = "Adj Close" if "Adj Close" in hist.columns else "Close"
+    price_col_bench = "Adj Close" if "Adj Close" in benchmark_hist.columns else "Close"
+
+    stock_returns = hist[price_col_stock].pct_change().dropna()
+    bench_returns = benchmark_hist[price_col_bench].pct_change().dropna()
+
+    aligned_stock, aligned_bench = stock_returns.align(bench_returns, join="inner")
+
+    if len(aligned_stock) < 12:
+        raise Exception("Недостаточно данных для расчета 5-летнего бета коэффициента")
+
+    covariance = np.cov(aligned_stock, aligned_bench, ddof=1)[0][1]
+    variance = np.var(aligned_bench, ddof=1)
+    if variance == 0:
+        raise Exception("Дисперсия эталонного индекса равна нулю")
+
+    beta = covariance / variance
+    return beta, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
 def calculate_cagr(ticker, period="5y"):
     stock = yf.Ticker(ticker)
@@ -247,7 +305,14 @@ def build_info_text(ticker, user_id=None):
     big = detect_last_large_buy(df, mult=settings["big_buy_mult"])
 
     info = []
-    info.append(f"ℹ️ {ticker}")
+    company_name = None
+    if user_id:
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+    if not company_name:
+        company_name = ticker_name_cache.get(ticker)
+    if not company_name:
+        company_name = get_company_name(ticker)
+    info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
@@ -295,6 +360,10 @@ def build_info_text(ticker, user_id=None):
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
+    user_comment = user_comments.get(user_id, {}).get(ticker) if user_id else None
+    if user_comment:
+        info.append(f"💬 Комментарий: {user_comment}")
+
     return "\n\n".join(info)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,14 +399,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for uid in TRUSTED_USERS:
             assets = user_assets.get(uid, [])
             comments = user_comments.get(uid, {})
+            names = user_asset_names.get(uid, {})
             
             if assets:
                 has_assets = True
                 user_display_name = get_user_name(uid)
                 all_assets_lines.append(f"👤 {user_display_name}:")
                 for asset in assets:
-                    comment = comments.get(asset, asset)
-                    all_assets_lines.append(f"  • {asset} ({comment})")
+                    company_name = names.get(asset)
+                    if not company_name:
+                        company_name = get_company_name(asset)
+                        user_asset_names.setdefault(uid, {})[asset] = company_name
+                    ticker_name_cache[asset] = company_name
+                    comment = comments.get(asset, "")
+                    comment_part = f": {comment}" if comment else ""
+                    display = f"{company_name} ({asset}){comment_part}"
+                    all_assets_lines.append(f"  • {display}")
                 all_assets_lines.append("")
         
         if not has_assets:
@@ -377,13 +454,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+        if not company_name:
+            company_name = get_company_name(ticker)
+            user_asset_names.setdefault(user_id, {})[ticker] = company_name
+        ticker_name_cache[ticker] = company_name
+        display_name = f"{company_name} ({ticker})" if company_name and company_name != ticker else ticker
         keyboard = [
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
             [InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calc_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
-        await query.edit_message_text(f"Актив {comment} ({ticker})", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Актив {display_name}\nКомментарий: {comment}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
@@ -403,6 +486,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del user_comments[user_id][ticker]
                 if not user_comments[user_id]:
                     del user_comments[user_id]
+            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
+                del user_asset_names[user_id][ticker]
+                if not user_asset_names[user_id]:
+                    del user_asset_names[user_id]
             if not user_assets[user_id]:
                 del user_assets[user_id]
             save_user_data()
@@ -418,7 +505,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
             [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
-            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}")],
+            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}"),
+             InlineKeyboardButton("DCF", callback_data=f"dcf_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -505,6 +593,72 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
+    elif query.data.startswith("dcf_"):
+        ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        try:
+            valuation = calculate_dcf_valuation(ticker)
+
+            intrinsic_value = valuation["intrinsic_value"]
+            current_price = valuation.get("current_price")
+            risk_free = valuation["risk_free"] * 100
+            market_return = valuation["market_return"] * 100
+            beta_value = valuation["beta"]
+            discount_rate = valuation["discount_rate"] * 100
+            growth_rate = valuation["growth_rate"] * 100
+            terminal_growth = valuation["terminal_growth"] * 100
+            pv_flows = valuation["pv_flows"]
+            pv_terminal = valuation["pv_terminal"]
+            forecast_flows = valuation["forecast_flows"]
+            historical_fcf = valuation["historical_fcf"]
+            shares = valuation["shares"]
+            sources = valuation["sources"]
+
+            diff_text = ""
+            if current_price:
+                diff = ((intrinsic_value - current_price) / current_price) * 100
+                diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к оценке)"
+
+            message_lines = [
+                f"💰 DCF оценка для {comment} ({ticker})",
+                f"Свободный денежный поток (история): {', '.join(f'{v/1e6:.2f}M' for v in historical_fcf)}",
+                f"Прогноз на 5 лет: {', '.join(f'{v/1e6:.2f}M' for v in forecast_flows)}",
+                f"Стоимость акции (DCF): {intrinsic_value:.2f} USD"
+            ]
+
+            if shares:
+                message_lines.append(f"Акций в обращении: {shares:,.0f}")
+
+            message_lines.extend([
+                f"Приведённая стоимость потоков (NPV₅): {pv_flows/1e6:.2f}M USD",
+                f"Приведённая стоимость терминальной ценности: {pv_terminal/1e6:.2f}M USD",
+                f"Ставка дисконтирования (CAPM): r = r_f + β*(R_m - r_f) = {risk_free:.2f}% + {beta_value:.2f}*({market_return:.2f}% - {risk_free:.2f}%) = {discount_rate:.2f}%",
+                f"Рост FCF: g = медиана(FCF_t/FCF_{'{'}t-1{'}'} - 1) = {growth_rate:.2f}%",
+                f"Терминальная стоимость: TV = FCF₅*(1+gₜ) / (r - gₜ), где gₜ = {terminal_growth:.2f}%",
+                "NPV = ∑_{t=1}^{5} FCF_t / (1+r)^t + TV / (1+r)^5"
+            ])
+
+            message_lines.append(diff_text)
+
+            sources_lines = [
+                "Источники:",
+                f"• r_f: {sources['risk_free']}",
+                f"• β и Shares: {sources['beta']}",
+                f"• FCF: {sources['cashflow']}"
+            ]
+
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
+            await query.edit_message_text(
+                "\n".join([line for line in message_lines if line]) + "\n\n" + "\n".join(sources_lines),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
+            await query.edit_message_text(
+                f"❌ Ошибка при расчёте DCF для {comment} ({ticker}): {e}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
 
@@ -550,7 +704,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user_states[user_id] = f"waiting_for_comment_{ticker}"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await update.message.reply_text(f"Введите комментарий для актива {ticker} (например, Apple):",
+        company_name = get_company_name(ticker)
+        prompt_name = company_name if company_name and company_name != ticker else ticker
+        await update.message.reply_text(f"Введите комментарий для актива {prompt_name} (например, один из ведущих тех-гигантов):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
     elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
@@ -565,6 +721,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
+
+            user_asset_names.setdefault(user_id, {})
+            company_name = get_company_name(ticker)
+            user_asset_names[user_id][ticker] = company_name
+            ticker_name_cache[ticker] = company_name
             
             save_user_data()
             
@@ -621,15 +782,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
+
+            user_asset_names.setdefault(user_id, {})
+            company_name = get_company_name(ticker)
+            user_asset_names[user_id][ticker] = company_name
+            ticker_name_cache[ticker] = company_name
             
             save_user_data()
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
 
+
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_comments, user_settings
+    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache
     try:
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
@@ -652,6 +819,7 @@ def load_user_data():
                 current_user_id = int(line.split(":")[1])
                 user_assets[current_user_id] = []
                 user_comments[current_user_id] = {}
+                user_asset_names[current_user_id] = {}
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -662,24 +830,44 @@ def load_user_data():
                 current_section = "assets"
             elif line.startswith("COMMENTS:") and current_user_id:
                 current_section = "comments"
+            elif line.startswith("NAMES:") and current_user_id:
+                current_section = "names"
             elif line.startswith("SETTINGS:") and current_user_id:
                 current_section = "settings"
             elif current_section == "assets" and current_user_id:
-                if line != "END_ASSETS":
+                if line == "END_ASSETS":
+                    current_section = None
+                else:
                     user_assets[current_user_id].append(line)
             elif current_section == "comments" and current_user_id:
-                if line != "END_COMMENTS":
+                if line == "END_COMMENTS":
+                    current_section = None
+                else:
                     if "=" in line:
                         ticker, comment = line.split("=", 1)
                         user_comments[current_user_id][ticker] = comment
             elif current_section == "settings" and current_user_id:
                 if line == "END_SETTINGS":
                     current_section = None
+                else:
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        user_settings[current_user_id][key] = value
+            elif current_section == "names" and current_user_id:
+                if line == "END_NAMES":
+                    current_section = None
+                else:
+                    if "=" in line:
+                        ticker, name = line.split("=", 1)
+                        user_asset_names[current_user_id][ticker] = name
+                        ticker_name_cache[ticker] = name
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
         user_assets = {}
         user_comments = {}
+        user_asset_names = {}
         user_settings = {}
+        ticker_name_cache = {}
 
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
@@ -701,6 +889,12 @@ def save_user_data():
                     f.write(f"{ticker}={comment}\n")
                 f.write("END_COMMENTS\n")
                 
+                f.write("NAMES:\n")
+                names = user_asset_names.get(user_id, {})
+                for ticker, name in names.items():
+                    f.write(f"{ticker}={name}\n")
+                f.write("END_NAMES\n")
+
                 f.write("SETTINGS:\n")
                 settings = {
                     "eps_bp": 5,
@@ -770,6 +964,10 @@ def remove_asset_from_all_users(ticker):
                 del user_comments[user_id][ticker]
                 if not user_comments[user_id]:
                     del user_comments[user_id]
+            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
+                del user_asset_names[user_id][ticker]
+                if not user_asset_names[user_id]:
+                    del user_asset_names[user_id]
 
 async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
     """Отправляет уведомления пользователям об добавлении актива в черный список"""
@@ -795,6 +993,154 @@ def calculate_pe_ratio(ticker):
         return info["forwardPE"], f"https://finance.yahoo.com/quote/{ticker}/analysis"
     else:
         raise Exception("P/E данные недоступны для этого актива")
+
+
+def fetch_risk_free_rate():
+    try:
+        tnx = yf.Ticker("^TNX")
+        hist = tnx.history(period="10d")
+        if not hist.empty:
+            latest = hist["Close"].dropna()
+            if not latest.empty:
+                return float(latest.iloc[-1]) / 100.0, "https://finance.yahoo.com/quote/%5ETNX"
+    except Exception:
+        pass
+    return 0.04, "https://finance.yahoo.com/quote/%5ETNX"
+
+
+def estimate_market_return():
+    try:
+        spx = yf.Ticker("^GSPC")
+        hist = spx.history(period="5y")
+        if len(hist) >= 2:
+            price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+            start_price = hist[price_column].iloc[0]
+            end_price = hist[price_column].iloc[-1]
+            years = (hist.index[-1] - hist.index[0]).days / 365.25
+            if start_price > 0 and years > 0:
+                market_return = (end_price / start_price) ** (1.0 / years) - 1
+                return float(market_return)
+    except Exception:
+        pass
+    return 0.08
+
+
+def calculate_dcf_valuation(ticker):
+    stock = yf.Ticker(ticker)
+
+    risk_free, risk_free_source = fetch_risk_free_rate()
+    market_return = estimate_market_return()
+    beta_value, beta_source = calculate_beta_5y_monthly(ticker)
+
+    equity_cost = risk_free + beta_value * max(market_return - risk_free, 0.0)
+    equity_cost = max(equity_cost, risk_free + 0.01)
+
+    cashflow_df = stock.cashflow
+    if cashflow_df is None or cashflow_df.empty or "Free Cash Flow" not in cashflow_df.index:
+        raise Exception("Нет данных о свободном денежном потоке")
+
+    fcf_series = cashflow_df.loc["Free Cash Flow"].dropna()
+    if fcf_series.empty:
+        raise Exception("Нет доступных значений свободного денежного потока")
+
+    fcf_values = list(reversed(fcf_series.tolist()))
+    fcf_values = [float(v) for v in fcf_values if not np.isnan(v)]
+    if len(fcf_values) < 3:
+        raise Exception("Недостаточно исторических значений FCF для прогноза")
+
+    fcf_values = fcf_values[-5:]
+
+    growth_rates = []
+    for i in range(1, len(fcf_values)):
+        prev = fcf_values[i - 1]
+        current = fcf_values[i]
+        if prev != 0:
+            growth_rates.append((current / prev) - 1)
+
+    if growth_rates:
+        median_growth = float(np.median(growth_rates))
+        growth_rate = max(min(median_growth, 0.25), -0.2)
+    else:
+        growth_rate = 0.02
+
+    last_fcf = fcf_values[-1]
+    forecast_flows = []
+    projected_fcf = last_fcf
+    for _ in range(5):
+        projected_fcf *= (1 + growth_rate)
+        forecast_flows.append(projected_fcf)
+
+    terminal_growth = 0.02 if growth_rate > 0 else 0.01
+    if equity_cost <= terminal_growth:
+        terminal_growth = min(terminal_growth, equity_cost - 0.01)
+        if terminal_growth < 0:
+            terminal_growth = 0.0
+            equity_cost = max(equity_cost, 0.05)
+
+    discount_factor = 1 + equity_cost
+    pv_flows = 0.0
+    for year, flow in enumerate(forecast_flows, start=1):
+        pv_flows += flow / (discount_factor ** year)
+
+    terminal_value = forecast_flows[-1] * (1 + terminal_growth)
+    denominator = equity_cost - terminal_growth if equity_cost > terminal_growth else 0.01
+    terminal_value = terminal_value / denominator
+    pv_terminal = terminal_value / (discount_factor ** 5)
+
+    equity_value = pv_flows + pv_terminal
+
+    shares_outstanding = None
+    try:
+        fast_info = stock.fast_info
+        shares_outstanding = fast_info.get("shares_outstanding")
+    except Exception:
+        shares_outstanding = None
+
+    if not shares_outstanding:
+        shares_outstanding = stock.info.get("sharesOutstanding")
+
+    if not shares_outstanding or shares_outstanding <= 0:
+        raise Exception("Нет данных о количестве акций в обращении")
+
+    intrinsic_value = equity_value / shares_outstanding
+
+    current_price = None
+    try:
+        fast_info = stock.fast_info
+        current_price = fast_info.get("last_price")
+    except Exception:
+        pass
+
+    if current_price is None:
+        hist = stock.history(period="5d")
+        if not hist.empty:
+            price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+            current_price = float(hist[price_column].iloc[-1])
+
+    sources = {
+        "risk_free": risk_free_source,
+        "beta": beta_source,
+        "cashflow": f"https://finance.yahoo.com/quote/{ticker}/cash-flow",
+        "shares": f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    }
+
+    return {
+        "risk_free": risk_free,
+        "market_return": market_return,
+        "beta": beta_value,
+        "discount_rate": equity_cost,
+        "historical_fcf": fcf_values,
+        "growth_rate": growth_rate,
+        "forecast_flows": forecast_flows,
+        "terminal_growth": terminal_growth,
+        "pv_flows": pv_flows,
+        "pv_terminal": pv_terminal,
+        "equity_value": equity_value,
+        "intrinsic_value": intrinsic_value,
+        "current_price": current_price,
+        "shares": shares_outstanding,
+        "sources": sources
+    }
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
