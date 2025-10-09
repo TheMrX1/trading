@@ -990,19 +990,20 @@ def fetch_risk_free_rate():
 
 
 def estimate_market_return():
-    try:
-        spx = yf.Ticker("^GSPC")
-        hist = spx.history(period="5y")
-        if len(hist) >= 2:
-            price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
-            start_price = hist[price_column].iloc[0]
-            end_price = hist[price_column].iloc[-1]
-            years = (hist.index[-1] - hist.index[0]).days / 365.25
-            if start_price > 0 and years > 0:
-                market_return = (end_price / start_price) ** (1.0 / years) - 1
-                return float(market_return)
-    except Exception:
-        pass
+    for ticker in ["^SP500TR", "^SPXTR", "^GSPC"]:
+        try:
+            tr = yf.Ticker(ticker)
+            hist = tr.history(period="5y")
+            if len(hist) >= 2:
+                price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                start_price = hist[price_column].iloc[0]
+                end_price = hist[price_column].iloc[-1]
+                years = (hist.index[-1] - hist.index[0]).days / 365.25
+                if start_price > 0 and years > 0:
+                    market_return = (end_price / start_price) ** (1.0 / years) - 1
+                    return float(market_return)
+        except Exception:
+            continue
     return 0.08
 
 
