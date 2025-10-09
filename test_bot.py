@@ -67,6 +67,23 @@ def get_company_name(ticker):
     ticker_name_cache[ticker] = name
     return name
 
+
+def get_display_name(ticker, user_id=None):
+    ticker = ticker.upper()
+    company_name = None
+    if user_id:
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+    if not company_name:
+        company_name = ticker_name_cache.get(ticker)
+    if not company_name:
+        company_name = get_company_name(ticker)
+    if user_id:
+        user_asset_names.setdefault(user_id, {})[ticker] = company_name
+    ticker_name_cache[ticker] = company_name
+    if company_name and company_name != ticker:
+        return f"{company_name} ({ticker})"
+    return ticker
+
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -92,11 +109,7 @@ async def show_assets_menu(query, user_id, page=0):
 
     keyboard = []
     for asset in page_assets:
-        name = user_asset_names.get(user_id, {}).get(asset)
-        if not name:
-            name = get_company_name(asset)
-            user_asset_names.setdefault(user_id, {})[asset] = name
-        display_text = name if name else asset
+        display_text = get_display_name(asset, user_id)
         keyboard.append([InlineKeyboardButton(display_text, callback_data=f"asset_{asset}")])
 
     nav_buttons = []
@@ -481,12 +494,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
-        company_name = user_asset_names.get(user_id, {}).get(ticker)
-        if not company_name:
-            company_name = get_company_name(ticker)
-            user_asset_names.setdefault(user_id, {})[ticker] = company_name
-        ticker_name_cache[ticker] = company_name
-        display_name = f"{company_name} ({ticker})" if company_name and company_name != ticker else ticker
+        display_name = get_display_name(ticker, user_id)
         keyboard = [
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
@@ -526,7 +534,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("calc_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         keyboard = [
             [InlineKeyboardButton("CAGR", callback_data=f"cagr_{ticker}"),
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
@@ -536,130 +544,100 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🎯 12M Target", callback_data=f"target_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
-        await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"🧮 Калькулятор для {display_name}\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("cagr_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             cagr_5y_value, source_url = calculate_cagr(ticker, period="5y")
             cagr_3y_value, _ = calculate_cagr(ticker, period="3y")
-            
-            message_text = f"📈 CAGR для {comment} ({ticker}):\n\n"
+            message_text = f"📈 CAGR для {display_name}:\n\n"
             message_text += f"5-летний: {cagr_5y_value:.2f}%\n"
             message_text += f"3-летний: {cagr_3y_value:.2f}%\n\n"
             message_text += f"Источник данных: {source_url}\n"
             message_text += f"Формула: CAGR = (Конечная стоимость / Начальная стоимость)^(1/n) - 1"
-            
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("eps_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             eps_value, source_url = calculate_eps(ticker)
-            message_text = f"📊 EPS для {comment} ({ticker}): ${eps_value:.2f}\n\nИсточник данных: {source_url}"
+            message_text = f"📊 EPS для {display_name}: ${eps_value:.2f}\n\nИсточник данных: {source_url}"
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете EPS для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете EPS для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("beta_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             beta_3y_value, source_url = calculate_beta(ticker)
             beta_5y_value, _ = calculate_beta_5y_monthly(ticker)
-            
-            message_text = f"📊 Бета-коэффициент для {comment} ({ticker}):\n\n"
+            message_text = f"📊 Бета-коэффициент для {display_name}:\n\n"
             message_text += f"5-летний (месячные данные): {beta_5y_value:.2f}\n"
             message_text += f"3-летний (дневные данные): {beta_3y_value:.2f}\n\n"
             message_text += f"Источник данных: {source_url}\n"
             message_text += f"Формула: β = Cov(Ri, Rm) / Var(Rm)"
-            
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("pe_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             pe_value, source_url = calculate_pe_ratio(ticker)
-            message_text = f"📊 P/E Ratio для {comment} ({ticker}): {pe_value:.2f}\n\nИсточник данных: {source_url}"
+            message_text = f"📊 P/E Ratio для {display_name}: {pe_value:.2f}\n\nИсточник данных: {source_url}"
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при получении P/E Ratio для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при получении P/E Ratio для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("rvol_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             stock = yf.Ticker(ticker)
             df = stock.history(period="30d", interval="1d")
-            
             if df.empty:
                 raise Exception("Недостаточно данных для расчета RVOL")
-            
-            price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
-            
             last = df.iloc[-1]
             look = df.tail(100) if len(df) >= 100 else df
             avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
-            rvol = 0.0
-            if avg_vol is not None and avg_vol > 0:
-                rvol = float(last["Volume"]) / avg_vol
-            
-            message_text = f"📊 RVOL для {comment} ({ticker}): {rvol:.2f}\n\n"
+            rvol = float(last["Volume"]) / avg_vol if avg_vol else 0.0
+            message_text = f"📊 RVOL для {display_name}: {rvol:.2f}\n\n"
             message_text += f"Объём (последняя свеча 30d/1d): {int(last['Volume'])}\n"
             message_text += f"Средний объём: {int(avg_vol)}\n\n"
             message_text += f"Источник данных: https://finance.yahoo.com/quote/{ticker}/key-statistics"
-            
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+            await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data.startswith("target_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        display_name = get_display_name(ticker, user_id)
         try:
             target_value, source_url = fetch_consensus_target(ticker)
             if target_value is None:
                 raise Exception("Средняя целевая цена недоступна")
-
             stock = yf.Ticker(ticker)
-            current_price = None
-            try:
-                info = stock.fast_info
-                current_price = info.get("last_price")
-            except Exception:
-                pass
-
+            current_price = stock.fast_info.get("last_price") if hasattr(stock, "fast_info") else None
             if current_price is None:
                 hist = stock.history(period="5d")
                 if not hist.empty:
                     price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
                     current_price = float(hist[price_column].iloc[-1])
-
             diff_text = ""
             if current_price:
                 diff = ((target_value - current_price) / current_price) * 100
                 diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к таргету)"
-
-            message_text = (
-                f"🎯 Консенсусная 12-месячная цель для {comment} ({ticker}): {target_value:.2f} USD"
-                f"\nИсточник: {source_url}{diff_text}"
-            )
-
-            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            message_text = f"🎯 Консенсусная 12-месячная цель для {display_name}: {target_value:.2f} USD\nИсточник: {source_url}{diff_text}"
+            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
-            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
-            await query.edit_message_text(
-                f"❌ Ошибка при получении цели для {comment} ({ticker}): {e}",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await query.edit_message_text(f"❌ Ошибка при получении цели для {ticker}: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
