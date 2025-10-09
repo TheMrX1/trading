@@ -315,6 +315,22 @@ def build_info_text(ticker, user_id=None):
     info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
+    recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
+    recommendation_parts = []
+    if recommendation_key:
+        recommendation_parts.append(f"рейтинг: {recommendation_key}")
+    if recommendation_mean:
+        try:
+            recommendation_parts.append(f"mean: {float(recommendation_mean):.2f}")
+        except Exception:
+            pass
+    if num_analysts:
+        recommendation_parts.append(f"аналитиков: {num_analysts}")
+    if recommendation_parts:
+        recommendation_line = "; ".join(recommendation_parts)
+        info.append(f"📈 Оценка аналитиков: {recommendation_line}\nИсточник: {rec_source}")
+    elif rec_source:
+        info.append(f"📈 Оценка аналитиков: данные недоступны\nИсточник: {rec_source}")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
     
     cycle_periods = [
@@ -393,35 +409,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_assets_menu(query, user_id, page=0)
 
     elif query.data == "group_assets":
-        all_assets_lines = ["👥 Активы группы:\n"]
+        keyboard = []
         has_assets = False
-        
         for uid in TRUSTED_USERS:
             assets = user_assets.get(uid, [])
-            comments = user_comments.get(uid, {})
-            names = user_asset_names.get(uid, {})
-            
             if assets:
                 has_assets = True
                 user_display_name = get_user_name(uid)
-                all_assets_lines.append(f"👤 {user_display_name}:")
-                for asset in assets:
-                    company_name = names.get(asset)
-                    if not company_name:
-                        company_name = get_company_name(asset)
-                        user_asset_names.setdefault(uid, {})[asset] = company_name
-                    ticker_name_cache[asset] = company_name
-                    comment = comments.get(asset, "")
-                    comment_part = f": {comment}" if comment else ""
-                    display = f"{company_name} ({asset}){comment_part}"
-                    all_assets_lines.append(f"  • {display}")
-                all_assets_lines.append("")
-        
+                keyboard.append([InlineKeyboardButton(user_display_name, callback_data=f"group_user_{uid}")])
         if not has_assets:
-            all_assets_lines = ["👥 Активы группы:\n\nПока нет активов у пользователей."]
-        
-        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await query.edit_message_text("\n".join(all_assets_lines), reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text("👥 Активы группы:\n\nПока нет активов у пользователей.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]))
+            return
+
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+        await query.edit_message_text("Выберите пользователя:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("group_user_"):
+        target_user_id = int(query.data.split("_", 2)[2])
+        assets = user_assets.get(target_user_id, [])
+        comments = user_comments.get(target_user_id, {})
+        names = user_asset_names.get(target_user_id, {})
+
+        if not assets:
+            text = "У выбранного пользователя пока нет активов."
+        else:
+            lines = [f"👤 {get_user_name(target_user_id)}"]
+            for asset in assets:
+                company_name = names.get(asset)
+                if not company_name:
+                    company_name = get_company_name(asset)
+                    user_asset_names.setdefault(target_user_id, {})[asset] = company_name
+                ticker_name_cache[asset] = company_name
+                comment = comments.get(asset, "")
+                comment_part = f": {comment}" if comment else ""
+                lines.append(f"{company_name} ({asset}){comment_part}\n")
+            text = "\n".join(lines)
+
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Назад", callback_data="group_assets")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "blacklist":
         blacklist_lines = ["🚫 Черный список:\n"]
@@ -506,7 +533,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
             [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}"),
-             InlineKeyboardButton("DCF", callback_data=f"dcf_{ticker}")],
+             InlineKeyboardButton("🎯 12M Target", callback_data=f"target_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -593,69 +620,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
-    elif query.data.startswith("dcf_"):
+    elif query.data.startswith("target_"):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
-            valuation = calculate_dcf_valuation(ticker)
+            target_value, source_url = fetch_consensus_target(ticker)
+            if target_value is None:
+                raise Exception("Средняя целевая цена недоступна")
 
-            intrinsic_value = valuation["intrinsic_value"]
-            current_price = valuation.get("current_price")
-            risk_free = valuation["risk_free"] * 100
-            market_return = valuation["market_return"] * 100
-            beta_value = valuation["beta"]
-            discount_rate = valuation["discount_rate"] * 100
-            growth_rate = valuation["growth_rate"] * 100
-            terminal_growth = valuation["terminal_growth"] * 100
-            pv_flows = valuation["pv_flows"]
-            pv_terminal = valuation["pv_terminal"]
-            forecast_flows = valuation["forecast_flows"]
-            historical_fcf = valuation["historical_fcf"]
-            shares = valuation["shares"]
-            sources = valuation["sources"]
+            stock = yf.Ticker(ticker)
+            current_price = None
+            try:
+                info = stock.fast_info
+                current_price = info.get("last_price")
+            except Exception:
+                pass
+
+            if current_price is None:
+                hist = stock.history(period="5d")
+                if not hist.empty:
+                    price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                    current_price = float(hist[price_column].iloc[-1])
 
             diff_text = ""
             if current_price:
-                diff = ((intrinsic_value - current_price) / current_price) * 100
-                diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к оценке)"
+                diff = ((target_value - current_price) / current_price) * 100
+                diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к таргету)"
 
-            message_lines = [
-                f"💰 DCF оценка для {comment} ({ticker})",
-                f"Свободный денежный поток (история): {', '.join(f'{v/1e6:.2f}M' for v in historical_fcf)}",
-                f"Прогноз на 5 лет: {', '.join(f'{v/1e6:.2f}M' for v in forecast_flows)}",
-                f"Стоимость акции (DCF): {intrinsic_value:.2f} USD"
-            ]
-
-            if shares:
-                message_lines.append(f"Акций в обращении: {shares:,.0f}")
-
-            message_lines.extend([
-                f"Приведённая стоимость потоков (NPV₅): {pv_flows/1e6:.2f}M USD",
-                f"Приведённая стоимость терминальной ценности: {pv_terminal/1e6:.2f}M USD",
-                f"Ставка дисконтирования (CAPM): r = r_f + β*(R_m - r_f) = {risk_free:.2f}% + {beta_value:.2f}*({market_return:.2f}% - {risk_free:.2f}%) = {discount_rate:.2f}%",
-                f"Рост FCF: g = медиана(FCF_t/FCF_{'{'}t-1{'}'} - 1) = {growth_rate:.2f}%",
-                f"Терминальная стоимость: TV = FCF₅*(1+gₜ) / (r - gₜ), где gₜ = {terminal_growth:.2f}%",
-                "NPV = ∑_{t=1}^{5} FCF_t / (1+r)^t + TV / (1+r)^5"
-            ])
-
-            message_lines.append(diff_text)
-
-            sources_lines = [
-                "Источники:",
-                f"• r_f: {sources['risk_free']}",
-                f"• β и Shares: {sources['beta']}",
-                f"• FCF: {sources['cashflow']}"
-            ]
+            message_text = (
+                f"🎯 Консенсусная 12-месячная цель для {comment} ({ticker}): {target_value:.2f} USD"
+                f"\nИсточник: {source_url}{diff_text}"
+            )
 
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
-            await query.edit_message_text(
-                "\n".join([line for line in message_lines if line]) + "\n\n" + "\n".join(sources_lines),
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
             await query.edit_message_text(
-                f"❌ Ошибка при расчёте DCF для {comment} ({ticker}): {e}",
+                f"❌ Ошибка при получении цели для {comment} ({ticker}): {e}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
@@ -1141,6 +1143,56 @@ def calculate_dcf_valuation(ticker):
         "shares": shares_outstanding,
         "sources": sources
     }
+
+def fetch_consensus_target(ticker):
+    stock = yf.Ticker(ticker)
+    info = stock.info
+    target = info.get("targetMeanPrice") or info.get("targetMedianPrice") or info.get("targetHighPrice")
+    source = f"https://finance.yahoo.com/quote/{ticker}/analysis"
+    if target is None:
+        try:
+            target = stock.recommendations_summary.loc[:, "mean"].iloc[-1]
+        except Exception:
+            target = None
+    if target is None:
+        return None, source
+    return float(target), source
+
+
+def fetch_analyst_recommendation(ticker):
+    stock = yf.Ticker(ticker)
+    info = stock.info
+    recommendation_key = info.get("recommendationKey")
+    recommendation_mean = info.get("recommendationMean")
+    num_analysts = info.get("numberOfAnalystOpinions")
+    source = f"https://finance.yahoo.com/quote/{ticker}/analysis"
+
+    summary_lines = []
+    try:
+        summary = stock.recommendations_summary
+        if summary is not None and not summary.empty:
+            latest = summary.iloc[-1]
+            for label in ["strongBuy", "buy", "hold", "sell", "strongSell"]:
+                value = latest.get(label)
+                if value and value > 0:
+                    summary_lines.append(f"{label}: {int(value)}")
+            if "mean" in latest and latest[
+                "mean"
+            ]:
+                recommendation_mean = latest["mean"]
+            total = float(sum(latest.dropna()))
+            if total > 0 and not recommendation_key:
+                if latest.get("strongBuy", 0) + latest.get("buy", 0) > total * 0.6:
+                    recommendation_key = "buy"
+                elif latest.get("sell", 0) + latest.get("strongSell", 0) > total * 0.6:
+                    recommendation_key = "sell"
+                else:
+                    recommendation_key = "hold"
+    except Exception:
+        pass
+
+    distribution = ", ".join(summary_lines) if summary_lines else None
+    return recommendation_key, recommendation_mean, num_analysts, distribution, source
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
