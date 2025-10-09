@@ -89,7 +89,13 @@ def classify_cycle(df):
     close = df[price_column].iloc[-1]
     ema = df["EMA20"].iloc[-1]
     above = close > ema
-    near_flat_ema = abs(ema_slope) < (df[price_column].std() * 0.02 if df[price_column].std() else 0.0)
+    price_std = df[price_column].std()
+    flat_threshold = price_std * 0.02 if price_std and not np.isnan(price_std) else 0.0
+    if np.isnan(flat_threshold):
+        flat_threshold = 0.0
+    ema_abs = abs(ema) if not np.isnan(ema) else 0.0
+    flat_threshold = max(flat_threshold, max(ema_abs * 1e-4, 1e-6))
+    near_flat_ema = abs(ema_slope) <= flat_threshold
 
     delta = np.sign(df[price_column].diff().fillna(0))
     obv = (delta * df["Volume"]).fillna(0).cumsum()
@@ -97,7 +103,10 @@ def classify_cycle(df):
 
     window = df[price_column].tail(50)
     rng = (window.max() - window.min()) if len(window) > 0 else 0
-    in_range = (rng > 0) and (window.min() + 0.2 * rng < close < window.max() - 0.2 * rng)
+    if rng == 0:
+        in_range = True
+    else:
+        in_range = (window.min() + 0.2 * rng) < close < (window.max() - 0.2 * rng)
 
     if ema_slope > 0 and above and obv_slope > 0:
         return "Markup (рост)"
@@ -169,8 +178,8 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
     stock_returns_aligned = aligned_data[0]
     benchmark_returns_aligned = aligned_data[1]
     
-    covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned)[0][1]
-    benchmark_variance = np.var(benchmark_returns_aligned)
+    covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned, ddof=1)[0][1]
+    benchmark_variance = np.var(benchmark_returns_aligned, ddof=1)
     
     if benchmark_variance == 0:
         raise Exception("Дисперсия эталонного индекса равна нулю")
@@ -181,11 +190,29 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
 def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
     stock = yf.Ticker(ticker)
     info = stock.info
-    
-    if "beta" in info and info["beta"] is not None:
+    if info.get("beta") is not None:
         return info["beta"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
-    else:
-        return 1.11, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    hist = stock.history(period="5y", interval="1mo")
+    benchmark_hist = yf.Ticker(benchmark).history(period="5y", interval="1mo")
+
+    price_col_stock = "Adj Close" if "Adj Close" in hist.columns else "Close"
+    price_col_bench = "Adj Close" if "Adj Close" in benchmark_hist.columns else "Close"
+
+    stock_returns = hist[price_col_stock].pct_change().dropna()
+    bench_returns = benchmark_hist[price_col_bench].pct_change().dropna()
+
+    aligned_stock, aligned_bench = stock_returns.align(bench_returns, join="inner")
+
+    if len(aligned_stock) < 12:
+        raise Exception("Недостаточно данных для расчета 5-летнего бета коэффициента")
+
+    covariance = np.cov(aligned_stock, aligned_bench, ddof=1)[0][1]
+    variance = np.var(aligned_bench, ddof=1)
+    if variance == 0:
+        raise Exception("Дисперсия эталонного индекса равна нулю")
+
+    beta = covariance / variance
+    return beta, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
 def calculate_cagr(ticker, period="5y"):
     stock = yf.Ticker(ticker)
