@@ -40,6 +40,10 @@ blacklist = {}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Persistent data directory inside the project
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -631,7 +635,7 @@ def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
     global user_assets, user_comments, user_settings
     try:
-        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
+        users_file_path = os.path.join(DATA_DIR, "users.txt")
         
         if not os.path.exists(users_file_path):
             save_user_data()
@@ -684,7 +688,7 @@ def load_user_data():
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
     try:
-        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
+        users_file_path = os.path.join(DATA_DIR, "users.txt")
         
         with open(users_file_path, "w", encoding="utf-8") as f:
             for user_id in user_assets.keys():
@@ -721,7 +725,7 @@ def load_blacklist():
     """Загружает черный список из файла blacklist.txt"""
     global blacklist
     try:
-        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
+        blacklist_file_path = os.path.join(DATA_DIR, "blacklist.txt")
         
         if not os.path.exists(blacklist_file_path):
             save_blacklist()
@@ -749,7 +753,7 @@ def load_blacklist():
 def save_blacklist():
     """Сохраняет черный список в файл blacklist.txt"""
     try:
-        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
+        blacklist_file_path = os.path.join(DATA_DIR, "blacklist.txt")
         
         with open(blacklist_file_path, "w", encoding="utf-8") as f:
             for ticker, data in blacklist.items():
