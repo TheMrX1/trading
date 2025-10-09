@@ -445,7 +445,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
             [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
-            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}")],
+            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}"),
+             InlineKeyboardButton("DCF", callback_data=f"dcf_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -531,6 +532,72 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+
+    elif query.data.startswith("dcf_"):
+        ticker = query.data.split("_", 1)[1]
+        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        try:
+            valuation = calculate_dcf_valuation(ticker)
+
+            intrinsic_value = valuation["intrinsic_value"]
+            current_price = valuation.get("current_price")
+            risk_free = valuation["risk_free"] * 100
+            market_return = valuation["market_return"] * 100
+            beta_value = valuation["beta"]
+            discount_rate = valuation["discount_rate"] * 100
+            growth_rate = valuation["growth_rate"] * 100
+            terminal_growth = valuation["terminal_growth"] * 100
+            pv_flows = valuation["pv_flows"]
+            pv_terminal = valuation["pv_terminal"]
+            forecast_flows = valuation["forecast_flows"]
+            historical_fcf = valuation["historical_fcf"]
+            shares = valuation["shares"]
+            sources = valuation["sources"]
+
+            diff_text = ""
+            if current_price:
+                diff = ((intrinsic_value - current_price) / current_price) * 100
+                diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к оценке)"
+
+            message_lines = [
+                f"💰 DCF оценка для {comment} ({ticker})",
+                f"Свободный денежный поток (история): {', '.join(f'{v/1e6:.2f}M' for v in historical_fcf)}",
+                f"Прогноз на 5 лет: {', '.join(f'{v/1e6:.2f}M' for v in forecast_flows)}",
+                f"Стоимость акции (DCF): {intrinsic_value:.2f} USD"
+            ]
+
+            if shares:
+                message_lines.append(f"Акций в обращении: {shares:,.0f}")
+
+            message_lines.extend([
+                f"Приведённая стоимость потоков (NPV₅): {pv_flows/1e6:.2f}M USD",
+                f"Приведённая стоимость терминальной ценности: {pv_terminal/1e6:.2f}M USD",
+                f"Ставка дисконтирования (CAPM): r = r_f + β*(R_m - r_f) = {risk_free:.2f}% + {beta_value:.2f}*({market_return:.2f}% - {risk_free:.2f}%) = {discount_rate:.2f}%",
+                f"Рост FCF: g = медиана(FCF_t/FCF_{'{'}t-1{'}'} - 1) = {growth_rate:.2f}%",
+                f"Терминальная стоимость: TV = FCF₅*(1+gₜ) / (r - gₜ), где gₜ = {terminal_growth:.2f}%",
+                "NPV = ∑_{t=1}^{5} FCF_t / (1+r)^t + TV / (1+r)^5"
+            ])
+
+            message_lines.append(diff_text)
+
+            sources_lines = [
+                "Источники:",
+                f"• r_f: {sources['risk_free']}",
+                f"• β и Shares: {sources['beta']}",
+                f"• FCF: {sources['cashflow']}"
+            ]
+
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
+            await query.edit_message_text(
+                "\n".join([line for line in message_lines if line]) + "\n\n" + "\n".join(sources_lines),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]
+            await query.edit_message_text(
+                f"❌ Ошибка при расчёте DCF для {comment} ({ticker}): {e}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -653,6 +720,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
+
 
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
@@ -822,6 +890,154 @@ def calculate_pe_ratio(ticker):
         return info["forwardPE"], f"https://finance.yahoo.com/quote/{ticker}/analysis"
     else:
         raise Exception("P/E данные недоступны для этого актива")
+
+
+def fetch_risk_free_rate():
+    try:
+        tnx = yf.Ticker("^TNX")
+        hist = tnx.history(period="10d")
+        if not hist.empty:
+            latest = hist["Close"].dropna()
+            if not latest.empty:
+                return float(latest.iloc[-1]) / 100.0, "https://finance.yahoo.com/quote/%5ETNX"
+    except Exception:
+        pass
+    return 0.04, "https://finance.yahoo.com/quote/%5ETNX"
+
+
+def estimate_market_return():
+    try:
+        spx = yf.Ticker("^GSPC")
+        hist = spx.history(period="5y")
+        if len(hist) >= 2:
+            price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+            start_price = hist[price_column].iloc[0]
+            end_price = hist[price_column].iloc[-1]
+            years = (hist.index[-1] - hist.index[0]).days / 365.25
+            if start_price > 0 and years > 0:
+                market_return = (end_price / start_price) ** (1.0 / years) - 1
+                return float(market_return)
+    except Exception:
+        pass
+    return 0.08
+
+
+def calculate_dcf_valuation(ticker):
+    stock = yf.Ticker(ticker)
+
+    risk_free, risk_free_source = fetch_risk_free_rate()
+    market_return = estimate_market_return()
+    beta_value, beta_source = calculate_beta_5y_monthly(ticker)
+
+    equity_cost = risk_free + beta_value * max(market_return - risk_free, 0.0)
+    equity_cost = max(equity_cost, risk_free + 0.01)
+
+    cashflow_df = stock.cashflow
+    if cashflow_df is None or cashflow_df.empty or "Free Cash Flow" not in cashflow_df.index:
+        raise Exception("Нет данных о свободном денежном потоке")
+
+    fcf_series = cashflow_df.loc["Free Cash Flow"].dropna()
+    if fcf_series.empty:
+        raise Exception("Нет доступных значений свободного денежного потока")
+
+    fcf_values = list(reversed(fcf_series.tolist()))
+    fcf_values = [float(v) for v in fcf_values if not np.isnan(v)]
+    if len(fcf_values) < 3:
+        raise Exception("Недостаточно исторических значений FCF для прогноза")
+
+    fcf_values = fcf_values[-5:]
+
+    growth_rates = []
+    for i in range(1, len(fcf_values)):
+        prev = fcf_values[i - 1]
+        current = fcf_values[i]
+        if prev != 0:
+            growth_rates.append((current / prev) - 1)
+
+    if growth_rates:
+        median_growth = float(np.median(growth_rates))
+        growth_rate = max(min(median_growth, 0.25), -0.2)
+    else:
+        growth_rate = 0.02
+
+    last_fcf = fcf_values[-1]
+    forecast_flows = []
+    projected_fcf = last_fcf
+    for _ in range(5):
+        projected_fcf *= (1 + growth_rate)
+        forecast_flows.append(projected_fcf)
+
+    terminal_growth = 0.02 if growth_rate > 0 else 0.01
+    if equity_cost <= terminal_growth:
+        terminal_growth = min(terminal_growth, equity_cost - 0.01)
+        if terminal_growth < 0:
+            terminal_growth = 0.0
+            equity_cost = max(equity_cost, 0.05)
+
+    discount_factor = 1 + equity_cost
+    pv_flows = 0.0
+    for year, flow in enumerate(forecast_flows, start=1):
+        pv_flows += flow / (discount_factor ** year)
+
+    terminal_value = forecast_flows[-1] * (1 + terminal_growth)
+    denominator = equity_cost - terminal_growth if equity_cost > terminal_growth else 0.01
+    terminal_value = terminal_value / denominator
+    pv_terminal = terminal_value / (discount_factor ** 5)
+
+    equity_value = pv_flows + pv_terminal
+
+    shares_outstanding = None
+    try:
+        fast_info = stock.fast_info
+        shares_outstanding = fast_info.get("shares_outstanding")
+    except Exception:
+        shares_outstanding = None
+
+    if not shares_outstanding:
+        shares_outstanding = stock.info.get("sharesOutstanding")
+
+    if not shares_outstanding or shares_outstanding <= 0:
+        raise Exception("Нет данных о количестве акций в обращении")
+
+    intrinsic_value = equity_value / shares_outstanding
+
+    current_price = None
+    try:
+        fast_info = stock.fast_info
+        current_price = fast_info.get("last_price")
+    except Exception:
+        pass
+
+    if current_price is None:
+        hist = stock.history(period="5d")
+        if not hist.empty:
+            price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+            current_price = float(hist[price_column].iloc[-1])
+
+    sources = {
+        "risk_free": risk_free_source,
+        "beta": beta_source,
+        "cashflow": f"https://finance.yahoo.com/quote/{ticker}/cash-flow",
+        "shares": f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+    }
+
+    return {
+        "risk_free": risk_free,
+        "market_return": market_return,
+        "beta": beta_value,
+        "discount_rate": equity_cost,
+        "historical_fcf": fcf_values,
+        "growth_rate": growth_rate,
+        "forecast_flows": forecast_flows,
+        "terminal_growth": terminal_growth,
+        "pv_flows": pv_flows,
+        "pv_terminal": pv_terminal,
+        "equity_value": equity_value,
+        "intrinsic_value": intrinsic_value,
+        "current_price": current_price,
+        "shares": shares_outstanding,
+        "sources": sources
+    }
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
