@@ -9,43 +9,37 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 )
 
-# 🔑 Токен и список доверенных пользователей
 load_dotenv()
 BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("TEST_BOT_TOKEN not found in .env file")
 
 TRUSTED_USERS = [1085064193, 7424028554]
-#TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336]
+#TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336, 5405897708]
 
-# Отображение имен пользователей
 USER_NAMES = {
-    1085064193: "Дима",
+    1085064193: "Дима О",
     1563262750: "Маша",
     1221434895: "Кира",
     1229198783: "Катя",
     829213580: "Лиза",
     1647115336: "Ульяна",
-    7424028554: "MrX"
+    7424028554: "MrX",
+    5405897708: "Дима З"
 }
 
-# Хранилище активов, состояний и настроек
 user_assets = {}
 user_states = {}
-user_comments = {}  # user_id -> {ticker: comment}
-user_settings = {}  # user_id -> dict с настройками (будет содержать только значения по умолчанию)
+user_comments = {}
+user_settings = {}
 
-# Хранилище для кэширования имен пользователей
 user_names_cache = {}
 
-# Хранилище для черного списка
-blacklist = {}  # ticker -> {user_id, comment}
+blacklist = {}
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Главное меню ---
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -55,10 +49,6 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Меню настроек ---
-# Удалено, так как настройки больше не доступны пользователям
-
-# --- Команда /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
@@ -66,7 +56,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu())
 
-# --- Пагинация меню активов ---
 async def show_assets_menu(query, user_id, page=0):
     assets = user_assets.get(user_id, [])
     per_page = 5
@@ -74,7 +63,6 @@ async def show_assets_menu(query, user_id, page=0):
     end = start + per_page
     page_assets = assets[start:end]
 
-    # Используем комментарий вместо тикера, если он есть
     keyboard = []
     for asset in page_assets:
         comment = user_comments.get(user_id, {}).get(asset, asset)
@@ -91,11 +79,9 @@ async def show_assets_menu(query, user_id, page=0):
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     await query.edit_message_text("Ваши активы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# --- Классификация стадии цикла ---
 def classify_cycle(df):
     df = df.copy()
     
-    # Определяем, какой столбец использовать для цен
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
     
     df["EMA20"] = df[price_column].ewm(span=20, adjust=False).mean()
@@ -123,12 +109,10 @@ def classify_cycle(df):
         return "Distribution (распределение)"
     return "Transition (переход)"
 
-# --- Приближенный объем ликвидности ---
 def estimate_liquidity(df, eps_bp=5):
     if df.empty or "Volume" not in df:
         return None
     
-    # Определяем, какой столбец использовать для цен
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
     
     if price_column not in df:
@@ -148,12 +132,10 @@ def estimate_liquidity(df, eps_bp=5):
     Q = min(Q, 10.0 * avg_vol)
     return int(Q)
 
-# --- Поиск последней крупной покупки ---
 def detect_last_large_buy(df, mult=2):
     if df.empty:
         return None
     
-    # Определяем, какой столбец использовать для цен
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
     
     look = df.tail(100) if len(df) >= 100 else df
@@ -167,33 +149,26 @@ def detect_last_large_buy(df, mult=2):
             return ts, int(row["Volume"])
     return None
 
-# --- Расчет бета-коэффициента ---
 def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
-    # Получаем данные для актива и эталонного индекса (S&P 500 по умолчанию)
     stock = yf.Ticker(ticker)
     benchmark_stock = yf.Ticker(benchmark)
     
-    # Используем более длинный период для более точного расчета
     stock_hist = stock.history(period=period)
     benchmark_hist = benchmark_stock.history(period=period)
     
     if len(stock_hist) < 30 or len(benchmark_hist) < 30:
         raise Exception("Недостаточно данных для расчета бета-коэффициента")
     
-    # Определяем, какой столбец использовать для цен
     stock_price_col = "Adj Close" if "Adj Close" in stock_hist.columns else "Close"
     benchmark_price_col = "Adj Close" if "Adj Close" in benchmark_hist.columns else "Close"
     
-    # Рассчитываем доходности
     stock_returns = stock_hist[stock_price_col].pct_change().dropna()
     benchmark_returns = benchmark_hist[benchmark_price_col].pct_change().dropna()
     
-    # Выравниваем данные по датам
     aligned_data = stock_returns.align(benchmark_returns, join='inner')
     stock_returns_aligned = aligned_data[0]
     benchmark_returns_aligned = aligned_data[1]
     
-    # Рассчитываем бета-коэффициент
     covariance = np.cov(stock_returns_aligned, benchmark_returns_aligned)[0][1]
     benchmark_variance = np.var(benchmark_returns_aligned)
     
@@ -203,31 +178,21 @@ def calculate_beta(ticker, benchmark="^GSPC", period="3y"):
     beta = covariance / benchmark_variance
     return beta, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
-# --- Расчет бета-коэффициента (5 лет, месячные данные) ---
 def calculate_beta_5y_monthly(ticker, benchmark="^GSPC"):
-    # Для 5y monthly мы не рассчитываем значение, а получаем его с Yahoo Finance
-    # В реальной реализации здесь должен быть парсинг страницы Yahoo Finance
-    # Но для упрощения возвращаем фиктивное значение и правильную ссылку
-    # В реальном приложении здесь должен быть код для извлечения значения с сайта
     stock = yf.Ticker(ticker)
     info = stock.info
     
-    # Пытаемся получить бета-коэффициент из доступной информации
     if "beta" in info and info["beta"] is not None:
         return info["beta"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
     else:
-        # Если бета недоступна, возвращаем значение по умолчанию
         return 1.11, f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
 
-# --- Расчет CAGR (Compound Annual Growth Rate) ---
 def calculate_cagr(ticker, period="5y"):
     stock = yf.Ticker(ticker)
-    # Получаем исторические данные за указанный период
     hist = stock.history(period=period)
     if len(hist) < 2:
         raise Exception("Недостаточно данных для расчета CAGR")
     
-    # Используем Adj Close если доступно, иначе Close
     if "Adj Close" in hist.columns:
         price_column = "Adj Close"
     elif "Close" in hist.columns:
@@ -241,17 +206,13 @@ def calculate_cagr(ticker, period="5y"):
     days = (hist.index[-1] - hist.index[0]).days
     years = days / 365.25
     
-    # CAGR = (End Value / Start Value)^(1/n) - 1
-    # где n - количество лет
     cagr = ((end_price / start_price) ** (1.0/years)) - 1
     return cagr * 100, f"https://finance.yahoo.com/quote/{ticker}/history"
 
-# --- Расчет EPS (Earnings Per Share) ---
 def calculate_eps(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info
     
-    # Пытаемся получить EPS из доступной информации
     if "trailingEps" in info and info["trailingEps"] is not None:
         return info["trailingEps"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
     elif "epsTrailingTwelveMonths" in info and info["epsTrailingTwelveMonths"] is not None:
@@ -260,7 +221,6 @@ def calculate_eps(ticker):
         raise Exception("EPS данные недоступны для этого актива")
 
 def build_info_text(ticker, user_id=None):
-    # Используем настройки по умолчанию
     settings = {
         "eps_bp": 5,
         "big_buy_mult": 2,
@@ -273,7 +233,6 @@ def build_info_text(ticker, user_id=None):
     if df.empty:
         return "Данные недостаточны для этого тикера."
 
-    # Определяем, какой столбец использовать для цен
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
     last = df.iloc[-1]
@@ -287,15 +246,12 @@ def build_info_text(ticker, user_id=None):
     stage = classify_cycle(df)
     big = detect_last_large_buy(df, mult=settings["big_buy_mult"])
 
-    # Форматируем вывод согласно требованиям
     info = []
     info.append(f"ℹ️ {ticker}")
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
-    # Добавляем информацию о периоде данных
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
     
-    # Добавляем стадии цикла для разных периодов (без дублирования 5 дней)
     cycle_periods = [
         (5, "5 дней", "5m"),
         (30, "1 месяц", "1d"),
@@ -309,7 +265,6 @@ def build_info_text(ticker, user_id=None):
         if days <= 30:
             period_df = stock.history(period=f"{days}d", interval=interval)
         else:
-            # Для периодов больше 30 дней используем соответствующий период
             if days == 90:
                 period_df = stock.history(period="3mo", interval=interval)
             elif days == 180:
@@ -321,12 +276,10 @@ def build_info_text(ticker, user_id=None):
         
         if not period_df.empty:
             period_stage = classify_cycle(period_df)
-            # Добавляем информацию о периоде и интервале в скобках
             cycle_lines.append(f"{label} ({days}d/{interval}): {period_stage}")
         else:
             cycle_lines.append(f"{label} ({days}d/{interval}): данные недоступны")
     
-    # Объединяем строки цикла и добавляем ссылку на график сразу после текста
     cycle_info = "\n".join(cycle_lines)
     chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
     info.append(f"{cycle_info}\n{chart_link}")
@@ -344,13 +297,11 @@ def build_info_text(ticker, user_id=None):
 
     return "\n\n".join(info)
 
-# --- Обработка кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
 
-    # Кэшируем имя пользователя
     user_name = query.from_user.username
     if user_name:
         user_names_cache[user_id] = user_name
@@ -373,27 +324,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_assets_menu(query, user_id, page=0)
 
     elif query.data == "group_assets":
-        # Собираем активы всех пользователей
         all_assets_lines = ["👥 Активы группы:\n"]
         has_assets = False
         
-        # Получаем информацию о всех пользователях
         for uid in TRUSTED_USERS:
-            # Проверяем, есть ли данные о пользователе
             assets = user_assets.get(uid, [])
             comments = user_comments.get(uid, {})
             
             if assets:
                 has_assets = True
-                # Получаем имя пользователя из кэша или используем ID
                 user_display_name = get_user_name(uid)
-                # Добавляем имя пользователя
                 all_assets_lines.append(f"👤 {user_display_name}:")
-                # Добавляем активы пользователя
                 for asset in assets:
                     comment = comments.get(asset, asset)
                     all_assets_lines.append(f"  • {asset} ({comment})")
-                all_assets_lines.append("")  # Пустая строка для разделения
+                all_assets_lines.append("")
         
         if not has_assets:
             all_assets_lines = ["👥 Активы группы:\n\nПока нет активов у пользователей."]
@@ -402,7 +347,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("\n".join(all_assets_lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "blacklist":
-        # Отображаем черный список
         blacklist_lines = ["🚫 Черный список:\n"]
         if blacklist:
             for ticker, data in blacklist.items():
@@ -453,19 +397,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("delete_"):
         ticker = query.data.split("_", 1)[1]
-        # Удаление актива из списка пользователя
         if user_id in user_assets and ticker in user_assets[user_id]:
             user_assets[user_id].remove(ticker)
-            # Удаляем комментарий, если он есть
             if user_id in user_comments and ticker in user_comments[user_id]:
                 del user_comments[user_id][ticker]
-                # Если словарь комментариев пользователя пуст, удаляем его
                 if not user_comments[user_id]:
                     del user_comments[user_id]
-            # Если список активов пользователя пуст, удаляем его
             if not user_assets[user_id]:
                 del user_assets[user_id]
-            # Сохраняем изменения в файл
             save_user_data()
             await query.edit_message_text(f"✅ Актив {ticker} успешно удален!", reply_markup=main_menu())
         else:
@@ -474,14 +413,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("calc_"):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
-        # Показываем меню калькулятора
         keyboard = [
             [InlineKeyboardButton("CAGR", callback_data=f"cagr_{ticker}"),
              InlineKeyboardButton("EPS", callback_data=f"eps_{ticker}")],
             [InlineKeyboardButton("β", callback_data=f"beta_{ticker}"),
              InlineKeyboardButton("P/E Ratio", callback_data=f"pe_{ticker}")],
-            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}"),
-             InlineKeyboardButton("DCF", callback_data=f"dcf_{ticker}")],
+            [InlineKeyboardButton("RVOL", callback_data=f"rvol_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {comment} ({ticker})\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -490,11 +427,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
-            # Рассчитываем CAGR для 3 лет и 5 лет
             cagr_5y_value, source_url = calculate_cagr(ticker, period="5y")
             cagr_3y_value, _ = calculate_cagr(ticker, period="3y")
             
-            # Формируем сообщение с обоими значениями
             message_text = f"📈 CAGR для {comment} ({ticker}):\n\n"
             message_text += f"5-летний: {cagr_5y_value:.2f}%\n"
             message_text += f"3-летний: {cagr_3y_value:.2f}%\n\n"
@@ -519,12 +454,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
-            # Рассчитываем 3-year daily beta
             beta_3y_value, source_url = calculate_beta(ticker)
-            # Получаем 5-year monthly beta с Yahoo Finance
             beta_5y_value, _ = calculate_beta_5y_monthly(ticker)
             
-            # Формируем сообщение с обоими значениями
             message_text = f"📊 Бета-коэффициент для {comment} ({ticker}):\n\n"
             message_text += f"5-летний (месячные данные): {beta_5y_value:.2f}\n"
             message_text += f"3-летний (дневные данные): {beta_3y_value:.2f}\n\n"
@@ -549,14 +481,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         try:
-            # Получаем данные для расчета RVOL
             stock = yf.Ticker(ticker)
-            df = stock.history(period="30d", interval="1d")  # Используем 30 дней с дневным интервалом
+            df = stock.history(period="30d", interval="1d")
             
             if df.empty:
                 raise Exception("Недостаточно данных для расчета RVOL")
             
-            # Определяем, какой столбец использовать для цен
             price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
             
             last = df.iloc[-1]
@@ -567,7 +497,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rvol = float(last["Volume"]) / avg_vol
             
             message_text = f"📊 RVOL для {comment} ({ticker}): {rvol:.2f}\n\n"
-            # Добавляем информацию о периоде данных
             message_text += f"Объём (последняя свеча 30d/1d): {int(last['Volume'])}\n"
             message_text += f"Средний объём: {int(avg_vol)}\n\n"
             message_text += f"Источник данных: https://finance.yahoo.com/quote/{ticker}/key-statistics"
@@ -575,15 +504,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
-
-    elif query.data.startswith("dcf_"):
-        ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
-        try:
-            message_text = await calculate_dcf(ticker, comment)
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
-        except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при расчете DCF для {comment} ({ticker}): {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -596,27 +516,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 2)[2]
         user_states[user_id] = f"force_add_{ticker}"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await query.edit_message_text(f"Введите комментарий для принудительного добавления {ticker} (актив в черном списке!):",
+        await query.edit_message_text(f"Введите комментарий для добавления {ticker} (актив в черном списке!):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # --- Обработка текстовых сообщений ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
         return
 
-    # Кэшируем имя пользователя
     user_name = update.effective_user.username
     if user_name:
         user_names_cache[user_id] = user_name
 
     if user_states.get(user_id) == "waiting_for_asset":
-        # Ожидаем тикер актива
         ticker = update.message.text.strip().upper()
         
-        # Проверяем, не находится ли актив в черном списке
         if ticker in blacklist:
-            # Актив в черном списке
             blacklist_data = blacklist[ticker]
             user_name = get_user_name(blacklist_data["user_id"])
             comment = blacklist_data["comment"]
@@ -639,29 +554,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
     elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
-        # Получаем тикер из состояния
         parts = user_states[user_id].split("_", 3)
         if len(parts) >= 4:
             ticker = parts[3]
             comment = update.message.text.strip()
             
-            # Добавляем актив и комментарий
             user_assets.setdefault(user_id, [])
             if ticker not in user_assets[user_id]:
                 user_assets[user_id].append(ticker)
             
-            # Сохраняем комментарий
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
             
-            # Сохраняем изменения в файл
             save_user_data()
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен с комментарием '{comment}'!", reply_markup=main_menu())
             
     elif user_states.get(user_id) == "waiting_for_blacklist_ticker":
-        # Ожидаем тикер для добавления в черный список
         ticker = update.message.text.strip().upper()
         user_states[user_id] = f"waiting_for_blacklist_comment_{ticker}"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="blacklist")]]
@@ -669,40 +579,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
     elif user_states.get(user_id, "").startswith("waiting_for_blacklist_comment_"):
-        # Получаем тикер из состояния
         parts = user_states[user_id].split("_", 4)
         if len(parts) >= 5:
             ticker = parts[4]
             comment = update.message.text.strip()
             
-            # Добавляем актив в черный список
             blacklist[ticker] = {"user_id": user_id, "comment": comment}
             
-            # Сохраняем черный список
             save_blacklist()
-            
-            # Удаляем актив из списков всех пользователей
             remove_asset_from_all_users(ticker)
-            
-            # Сохраняем изменения в файл пользователя
             save_user_data()
             
-            # Отправляем уведомления пользователям
             await notify_users_about_blacklist(context, ticker, user_id, comment)
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен в черный список с комментарием '{comment}'!", reply_markup=main_menu())
             
     elif user_states.get(user_id) == "waiting_for_remove_blacklist_ticker":
-        # Ожидаем тикер для удаления из черного списка
         ticker = update.message.text.strip().upper()
         
-        # Проверяем, находится ли актив в черном списке
         if ticker in blacklist:
-            # Удаляем из черного списка
             del blacklist[ticker]
             
-            # Сохраняем черный список
             save_blacklist()
             
             await update.message.reply_text(f"✅ Актив {ticker} удален из черного списка!", reply_markup=main_menu())
@@ -712,38 +610,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user_id] = None
         
     elif user_states.get(user_id, "").startswith("force_add_"):
-        # Принудительное добавление актива, который в черном списке
         parts = user_states[user_id].split("_", 2)
         if len(parts) >= 3:
             ticker = parts[2]
             comment = update.message.text.strip()
             
-            # Добавляем актив и комментарий
             user_assets.setdefault(user_id, [])
             if ticker not in user_assets[user_id]:
                 user_assets[user_id].append(ticker)
             
-            # Сохраняем комментарий
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
             
-            # Сохраняем изменения в файл
             save_user_data()
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
 
-# --- Загрузка данных пользователей из файла ---
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
     global user_assets, user_comments, user_settings
     try:
-        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
-        # Если файл не существует, создаем его с пустой структурой
         if not os.path.exists(users_file_path):
-            save_user_data()  # Создаем пустой файл со структурой
+            save_user_data()
             return
         
         with open(users_file_path, "r", encoding="utf-8") as f:
@@ -761,7 +652,6 @@ def load_user_data():
                 current_user_id = int(line.split(":")[1])
                 user_assets[current_user_id] = []
                 user_comments[current_user_id] = {}
-                # Настройки по умолчанию для всех пользователей
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -773,7 +663,6 @@ def load_user_data():
             elif line.startswith("COMMENTS:") and current_user_id:
                 current_section = "comments"
             elif line.startswith("SETTINGS:") and current_user_id:
-                # Игнорируем пользовательские настройки, используем только значения по умолчанию
                 current_section = "settings"
             elif current_section == "assets" and current_user_id:
                 if line != "END_ASSETS":
@@ -784,41 +673,34 @@ def load_user_data():
                         ticker, comment = line.split("=", 1)
                         user_comments[current_user_id][ticker] = comment
             elif current_section == "settings" and current_user_id:
-                # Игнорируем пользовательские настройки
                 if line == "END_SETTINGS":
                     current_section = None
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
-        # В случае ошибки используем пустые словари
         user_assets = {}
         user_comments = {}
         user_settings = {}
 
-# --- Сохранение данных пользователей в файл ---
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
     try:
-        # Определяем путь к файлу users.txt в директории mybot (на уровень выше trading)
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
         with open(users_file_path, "w", encoding="utf-8") as f:
             for user_id in user_assets.keys():
                 f.write(f"USER_ID:{user_id}\n")
                 
-                # Записываем активы
                 f.write("ASSETS:\n")
                 for asset in user_assets.get(user_id, []):
                     f.write(f"{asset}\n")
                 f.write("END_ASSETS\n")
                 
-                # Записываем комментарии
                 f.write("COMMENTS:\n")
                 comments = user_comments.get(user_id, {})
                 for ticker, comment in comments.items():
                     f.write(f"{ticker}={comment}\n")
                 f.write("END_COMMENTS\n")
                 
-                # Записываем настройки (только значения по умолчанию)
                 f.write("SETTINGS:\n")
                 settings = {
                     "eps_bp": 5,
@@ -833,20 +715,16 @@ def save_user_data():
     except Exception as e:
         logging.error(f"Ошибка при сохранении данных пользователей: {e}")
 
-# Загружаем данные пользователей при запуске
 load_user_data()
 
-# --- Загрузка черного списка из файла ---
 def load_blacklist():
     """Загружает черный список из файла blacklist.txt"""
     global blacklist
     try:
-        # Определяем путь к файлу blacklist.txt в директории mybot (на уровень выше trading)
         blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
         
-        # Если файл не существует, создаем его с пустой структурой
         if not os.path.exists(blacklist_file_path):
-            save_blacklist()  # Создаем пустой файл со структурой
+            save_blacklist()
             return
         
         with open(blacklist_file_path, "r", encoding="utf-8") as f:
@@ -866,14 +744,11 @@ def load_blacklist():
                     blacklist[ticker] = {"user_id": user_id, "comment": comment}
     except Exception as e:
         logging.error(f"Ошибка при загрузке черного списка: {e}")
-        # В случае ошибки используем пустой словарь
         blacklist = {}
 
-# --- Сохранение черного списка в файл ---
 def save_blacklist():
     """Сохраняет черный список в файл blacklist.txt"""
     try:
-        # Определяем путь к файлу blacklist.txt в директории mybot (на уровень выше trading)
         blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
         
         with open(blacklist_file_path, "w", encoding="utf-8") as f:
@@ -882,44 +757,35 @@ def save_blacklist():
     except Exception as e:
         logging.error(f"Ошибка при сохранении черного списка: {e}")
 
-# --- Получение имени пользователя ---
 def get_user_name(user_id):
     """Получает имя пользователя по ID"""
     return USER_NAMES.get(user_id, f"User_{user_id}")
 
-# --- Удаление актива из всех пользователей ---
 def remove_asset_from_all_users(ticker):
     """Удаляет актив из списков всех пользователей"""
     for user_id in user_assets:
         if ticker in user_assets[user_id]:
             user_assets[user_id].remove(ticker)
-            # Удаляем комментарий, если он есть
             if user_id in user_comments and ticker in user_comments[user_id]:
                 del user_comments[user_id][ticker]
-                # Если словарь комментариев пользователя пуст, удаляем его
                 if not user_comments[user_id]:
                     del user_comments[user_id]
 
-# --- Отправка уведомлений пользователям об добавлении в черный список ---
 async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
     """Отправляет уведомления пользователям об добавлении актива в черный список"""
     added_by_name = get_user_name(added_by_user_id)
     
-    # Проверяем, у кого есть эта акция
     for user_id in user_assets:
         if ticker in user_assets[user_id]:
             try:
-                # Отправляем уведомление пользователю
                 message = f"⚠️ Актив {ticker} был добавлен в черный список пользователем {added_by_name}.\n"
                 message += f"Комментарий: {comment}"
                 await context.bot.send_message(chat_id=user_id, text=message)
             except Exception as e:
                 logging.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
 
-# Загружаем черный список при запуске
 load_blacklist()
 
-# --- Расчет P/E Ratio ---
 def calculate_pe_ratio(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info
@@ -930,119 +796,6 @@ def calculate_pe_ratio(ticker):
     else:
         raise Exception("P/E данные недоступны для этого актива")
 
-# --- Расчет DCF (Discounted Cash Flow) ---
-async def calculate_dcf(ticker, comment):
-    """
-    Calculate Discounted Cash Flow model for stock valuation
-    """
-    try:
-        # Получаем данные акции
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        hist = stock.history(period="5y")
-        
-        # Проверяем, есть ли данные
-        if hist.empty:
-            raise Exception("Недостаточно исторических данных")
-        
-        # Используем Adj Close если доступно, иначе Close
-        price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
-        
-        # Текущая цена
-        current_price = hist[price_column].iloc[-1]
-        
-        # Получаем дивиденды
-        dividends = stock.dividends
-        latest_dividend = dividends.iloc[-1] if not dividends.empty else 0
-        
-        # Получаем EPS (Earnings Per Share)
-        eps = info.get("trailingEps", 0)
-        if eps is None:
-            eps = 0
-            
-        # Получаем бета-коэффициент
-        beta = info.get("beta", 1.0)
-        if beta is None:
-            beta = 1.0
-            
-        # Параметры для модели CAPM
-        risk_free_rate = 0.04  # 4% безрисковая ставка (можно адаптировать)
-        market_risk_premium = 0.055  # 5.5% премия за рыночный риск (можно адаптировать)
-        
-        # Рассчитываем стоимость капитала по CAPM
-        cost_of_equity = risk_free_rate + beta * market_risk_premium
-        
-        # Определяем темпы роста (можно использовать исторические данные или оценки аналитиков)
-        # Для простоты используем фиксированные значения, но в реальном приложении их нужно рассчитывать
-        short_term_growth = 0.08  # 8% на первый год
-        medium_term_growth = 0.05  # 5% на следующие несколько лет
-        long_term_growth = 0.03   # 3% в долгосрочной перспективе
-        
-        # Рассчитываем прогнозируемые денежные потоки
-        # Используем дивиденды как приближение денежных потоков для акционеров
-        if latest_dividend > 0:
-            # Если есть дивиденды, используем их
-            base_cf = latest_dividend
-        elif eps > 0:
-            # Если нет дивидендов, используем EPS как приближение
-            base_cf = eps * 0.5  # Предполагаем, что 50% прибыли возвращается акционерам
-        else:
-            # Если нет данных, используем небольшую часть текущей цены
-            base_cf = current_price * 0.02
-            
-        # Прогноз на 1 месяц (упрощенный)
-        cf_1m = base_cf * (1 + short_term_growth / 12)
-        pv_1m = cf_1m / ((1 + cost_of_equity / 12) ** 1)
-        
-        # Прогноз на 1 год
-        cf_1y = base_cf * (1 + short_term_growth)
-        pv_1y = cf_1y / ((1 + cost_of_equity) ** 1)
-        
-        # Прогноз на 5 лет (с учетом изменения темпов роста)
-        pv_5y = 0
-        cumulative_cf = base_cf
-        for year in range(1, 6):
-            if year <= 2:
-                growth_rate = short_term_growth
-            elif year <= 4:
-                growth_rate = medium_term_growth
-            else:
-                growth_rate = long_term_growth
-                
-            cumulative_cf = cumulative_cf * (1 + growth_rate)
-            pv = cumulative_cf / ((1 + cost_of_equity) ** year)
-            pv_5y += pv
-        
-        # Формируем сообщение с результатами
-        message_text = f"🧮 DCF модель для {comment} ({ticker}):\n\n"
-        message_text += f"📊 Входные данные:\n"
-        message_text += f"  • Текущая цена: ${current_price:.2f}\n"
-        message_text += f"  • EPS: ${eps:.2f}\n"
-        message_text += f"  • Дивиденды: ${latest_dividend:.2f}\n"
-        message_text += f"  • Бета: {beta:.2f}\n\n"
-        
-        message_text += f"📈 Расчет ставки дисконтирования (CAPM):\n"
-        message_text += f"  • Безрисковая ставка: {risk_free_rate*100:.1f}%\n"
-        message_text += f"  • Премия за рыночный риск: {market_risk_premium*100:.1f}%\n"
-        message_text += f"  • Стоимость капитала: {cost_of_equity*100:.2f}%\n\n"
-        
-        message_text += f"💰 Прогноз денежных потоков:\n"
-        message_text += f"  • 1 месяц: ${cf_1m:.4f}\n"
-        message_text += f"  • 1 год: ${cf_1y:.2f}\n"
-        message_text += f"  • 5 лет: кумулятивно ${cumulative_cf:.2f}\n\n"
-        
-        message_text += f"📉 Текущая стоимость:\n"
-        message_text += f"  • 1 месяц: ${pv_1m:.2f}\n"
-        message_text += f"  • 1 год: ${pv_1y:.2f}\n"
-        message_text += f"  • 5 лет: ${pv_5y:.2f}\n\n"
-        
-        message_text += f"📊 Источник данных: https://finance.yahoo.com/quote/{ticker}"
-        
-        return message_text
-    except Exception as e:
-        raise Exception(f"Ошибка при расчете DCF: {str(e)}")
-
-# --- Запуск бота ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
