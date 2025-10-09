@@ -33,12 +33,39 @@ user_states = {}
 user_comments = {}
 user_settings = {}
 
+user_asset_names = {}
+
+ticker_name_cache = {}
+
 user_names_cache = {}
 
 blacklist = {}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def get_company_name(ticker):
+    ticker = ticker.upper()
+    if ticker in ticker_name_cache:
+        return ticker_name_cache[ticker]
+
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        name = info.get("shortName") or info.get("longName")
+        if not name:
+            fast_info = getattr(stock, "fast_info", {})
+            name = fast_info.get("shortName") if fast_info else None
+    except Exception as exc:
+        logger.debug(f"Не удалось получить название компании для {ticker}: {exc}")
+        name = None
+
+    if not name:
+        name = ticker
+
+    ticker_name_cache[ticker] = name
+    return name
 
 def main_menu():
     keyboard = [
@@ -65,8 +92,12 @@ async def show_assets_menu(query, user_id, page=0):
 
     keyboard = []
     for asset in page_assets:
-        comment = user_comments.get(user_id, {}).get(asset, asset)
-        keyboard.append([InlineKeyboardButton(comment, callback_data=f"asset_{asset}")])
+        name = user_asset_names.get(user_id, {}).get(asset)
+        if not name:
+            name = get_company_name(asset)
+            user_asset_names.setdefault(user_id, {})[asset] = name
+        display_text = name if name else asset
+        keyboard.append([InlineKeyboardButton(display_text, callback_data=f"asset_{asset}")])
 
     nav_buttons = []
     if page > 0:
@@ -274,7 +305,14 @@ def build_info_text(ticker, user_id=None):
     big = detect_last_large_buy(df, mult=settings["big_buy_mult"])
 
     info = []
-    info.append(f"ℹ️ {ticker}")
+    company_name = None
+    if user_id:
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+    if not company_name:
+        company_name = ticker_name_cache.get(ticker)
+    if not company_name:
+        company_name = get_company_name(ticker)
+    info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
     info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
@@ -322,6 +360,10 @@ def build_info_text(ticker, user_id=None):
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
+    user_comment = user_comments.get(user_id, {}).get(ticker) if user_id else None
+    if user_comment:
+        info.append(f"💬 Комментарий: {user_comment}")
+
     return "\n\n".join(info)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,14 +399,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for uid in TRUSTED_USERS:
             assets = user_assets.get(uid, [])
             comments = user_comments.get(uid, {})
+            names = user_asset_names.get(uid, {})
             
             if assets:
                 has_assets = True
                 user_display_name = get_user_name(uid)
                 all_assets_lines.append(f"👤 {user_display_name}:")
                 for asset in assets:
-                    comment = comments.get(asset, asset)
-                    all_assets_lines.append(f"  • {asset} ({comment})")
+                    company_name = names.get(asset)
+                    if not company_name:
+                        company_name = get_company_name(asset)
+                        user_asset_names.setdefault(uid, {})[asset] = company_name
+                    ticker_name_cache[asset] = company_name
+                    comment = comments.get(asset, "")
+                    comment_part = f": {comment}" if comment else ""
+                    display = f"{company_name} ({asset}){comment_part}"
+                    all_assets_lines.append(f"  • {display}")
                 all_assets_lines.append("")
         
         if not has_assets:
@@ -404,13 +454,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+        if not company_name:
+            company_name = get_company_name(ticker)
+            user_asset_names.setdefault(user_id, {})[ticker] = company_name
+        ticker_name_cache[ticker] = company_name
+        display_name = f"{company_name} ({ticker})" if company_name and company_name != ticker else ticker
         keyboard = [
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
             [InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calc_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
-        await query.edit_message_text(f"Актив {comment} ({ticker})", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Актив {display_name}\nКомментарий: {comment}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
@@ -430,6 +486,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del user_comments[user_id][ticker]
                 if not user_comments[user_id]:
                     del user_comments[user_id]
+            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
+                del user_asset_names[user_id][ticker]
+                if not user_asset_names[user_id]:
+                    del user_asset_names[user_id]
             if not user_assets[user_id]:
                 del user_assets[user_id]
             save_user_data()
@@ -644,7 +704,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user_states[user_id] = f"waiting_for_comment_{ticker}"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await update.message.reply_text(f"Введите комментарий для актива {ticker} (например, Apple):",
+        company_name = get_company_name(ticker)
+        prompt_name = company_name if company_name and company_name != ticker else ticker
+        await update.message.reply_text(f"Введите комментарий для актива {prompt_name} (например, один из ведущих тех-гигантов):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
     elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
@@ -659,6 +721,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
+
+            user_asset_names.setdefault(user_id, {})
+            company_name = get_company_name(ticker)
+            user_asset_names[user_id][ticker] = company_name
+            ticker_name_cache[ticker] = company_name
             
             save_user_data()
             
@@ -715,6 +782,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_comments.setdefault(user_id, {})
             user_comments[user_id][ticker] = comment
+
+            user_asset_names.setdefault(user_id, {})
+            company_name = get_company_name(ticker)
+            user_asset_names[user_id][ticker] = company_name
+            ticker_name_cache[ticker] = company_name
             
             save_user_data()
             
@@ -724,7 +796,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_comments, user_settings
+    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache
     try:
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
@@ -747,6 +819,7 @@ def load_user_data():
                 current_user_id = int(line.split(":")[1])
                 user_assets[current_user_id] = []
                 user_comments[current_user_id] = {}
+                user_asset_names[current_user_id] = {}
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -757,24 +830,44 @@ def load_user_data():
                 current_section = "assets"
             elif line.startswith("COMMENTS:") and current_user_id:
                 current_section = "comments"
+            elif line.startswith("NAMES:") and current_user_id:
+                current_section = "names"
             elif line.startswith("SETTINGS:") and current_user_id:
                 current_section = "settings"
             elif current_section == "assets" and current_user_id:
-                if line != "END_ASSETS":
+                if line == "END_ASSETS":
+                    current_section = None
+                else:
                     user_assets[current_user_id].append(line)
             elif current_section == "comments" and current_user_id:
-                if line != "END_COMMENTS":
+                if line == "END_COMMENTS":
+                    current_section = None
+                else:
                     if "=" in line:
                         ticker, comment = line.split("=", 1)
                         user_comments[current_user_id][ticker] = comment
             elif current_section == "settings" and current_user_id:
                 if line == "END_SETTINGS":
                     current_section = None
+                else:
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        user_settings[current_user_id][key] = value
+            elif current_section == "names" and current_user_id:
+                if line == "END_NAMES":
+                    current_section = None
+                else:
+                    if "=" in line:
+                        ticker, name = line.split("=", 1)
+                        user_asset_names[current_user_id][ticker] = name
+                        ticker_name_cache[ticker] = name
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
         user_assets = {}
         user_comments = {}
+        user_asset_names = {}
         user_settings = {}
+        ticker_name_cache = {}
 
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
@@ -796,6 +889,12 @@ def save_user_data():
                     f.write(f"{ticker}={comment}\n")
                 f.write("END_COMMENTS\n")
                 
+                f.write("NAMES:\n")
+                names = user_asset_names.get(user_id, {})
+                for ticker, name in names.items():
+                    f.write(f"{ticker}={name}\n")
+                f.write("END_NAMES\n")
+
                 f.write("SETTINGS:\n")
                 settings = {
                     "eps_bp": 5,
@@ -865,6 +964,10 @@ def remove_asset_from_all_users(ticker):
                 del user_comments[user_id][ticker]
                 if not user_comments[user_id]:
                     del user_comments[user_id]
+            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
+                del user_asset_names[user_id][ticker]
+                if not user_asset_names[user_id]:
+                    del user_asset_names[user_id]
 
 async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
     """Отправляет уведомления пользователям об добавлении актива в черный список"""
