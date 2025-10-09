@@ -379,7 +379,7 @@ def build_info_text(ticker, user_id=None):
     info.append(f"{cycle_info}\n{chart_link}")
     
     if approx_book_vol is not None:
-        info.append(f"📥 Объем стакана (приближенный): ~{approx_book_vol} акций")
+        info.append(f"📥 Приближённая дневная ликвидность: ~{approx_book_vol} ед.")
     else:
         info.append("📥 Объем стакана (приближенный): оценка недоступна")
         
@@ -728,10 +728,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             blacklist[ticker] = {"user_id": user_id, "comment": comment}
             
             save_blacklist()
+            # Сначала уведомляем, затем удаляем актив у пользователей
+            await notify_users_about_blacklist(context, ticker, user_id, comment)
             remove_asset_from_all_users(ticker)
             save_user_data()
-            
-            await notify_users_about_blacklist(context, ticker, user_id, comment)
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен в черный список с комментарием '{comment}'!", reply_markup=main_menu())
@@ -970,7 +970,7 @@ def calculate_pe_ratio(ticker):
     if "trailingPE" in info and info["trailingPE"] is not None:
         return info["trailingPE"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
     elif "forwardPE" in info and info["forwardPE"] is not None:
-        return info["forwardPE"], f"https://finance.yahoo.com/quote/{ticker}/analysis"
+        return info["forwardPE"], f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
     else:
         raise Exception("P/E данные недоступны для этого актива")
 
@@ -982,7 +982,8 @@ def fetch_risk_free_rate():
         if not hist.empty:
             latest = hist["Close"].dropna()
             if not latest.empty:
-                return float(latest.iloc[-1]) / 100.0, "https://finance.yahoo.com/quote/%5ETNX"
+                # ^TNX публикуется в десятикратном масштабе (45.67 = 4.567%)
+                return float(latest.iloc[-1]) / 1000.0, "https://finance.yahoo.com/quote/%5ETNX"
     except Exception:
         pass
     return 0.04, "https://finance.yahoo.com/quote/%5ETNX"
@@ -1125,13 +1126,9 @@ def calculate_dcf_valuation(ticker):
 def fetch_consensus_target(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info
+    # Берём среднюю целевую цену, затем медиану, затем high как запасной вариант
     target = info.get("targetMeanPrice") or info.get("targetMedianPrice") or info.get("targetHighPrice")
-    source = f"https://finance.yahoo.com/quote/{ticker}/analysis"
-    if target is None:
-        try:
-            target = stock.recommendations_summary.loc[:, "mean"].iloc[-1]
-        except Exception:
-            target = None
+    source = f"https://finance.yahoo.com/quote/{ticker}"
     if target is None:
         return None, source
     return float(target), source
@@ -1150,19 +1147,18 @@ def fetch_analyst_recommendation(ticker):
         summary = stock.recommendations_summary
         if summary is not None and not summary.empty:
             latest = summary.iloc[-1]
-            for label in ["strongBuy", "buy", "hold", "sell", "strongSell"]:
+            categories = ["strongBuy", "buy", "hold", "sell", "strongSell"]
+            for label in categories:
                 value = latest.get(label)
                 if value and value > 0:
                     summary_lines.append(f"{label}: {int(value)}")
-            if "mean" in latest and latest[
-                "mean"
-            ]:
+            if "mean" in latest and latest["mean"]:
                 recommendation_mean = latest["mean"]
-            total = float(sum(latest.dropna()))
+            total = float(sum(latest.get(label, 0) or 0 for label in categories))
             if total > 0 and not recommendation_key:
-                if latest.get("strongBuy", 0) + latest.get("buy", 0) > total * 0.6:
+                if (latest.get("strongBuy", 0) or 0) + (latest.get("buy", 0) or 0) > total * 0.6:
                     recommendation_key = "buy"
-                elif latest.get("sell", 0) + latest.get("strongSell", 0) > total * 0.6:
+                elif (latest.get("sell", 0) or 0) + (latest.get("strongSell", 0) or 0) > total * 0.6:
                     recommendation_key = "sell"
                 else:
                     recommendation_key = "hold"
