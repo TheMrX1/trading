@@ -838,20 +838,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")])
         await query.edit_message_text("Открытые ордера:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data.startswith("order_"):
-        oid = query.data.split("_", 1)[1]
-        od = user_orders.get(user_id, {}).get(oid)
-        if not od:
-            await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
-            return
-        keyboard = [
-            [InlineKeyboardButton("✏️ Изменить цену", callback_data=f"order_edit_{oid}")],
-            [InlineKeyboardButton("⚡ Исполнить", callback_data=f"order_execute_{oid}")],
-            [InlineKeyboardButton("❌ Отменить", callback_data=f"order_cancel_{oid}")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]
-        ]
-        await query.edit_message_text(f"Ордер #{oid[:8]}\n{od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f} ({od['time_in_force']})", reply_markup=InlineKeyboardMarkup(keyboard))
-
     elif query.data.startswith("order_edit_"):
         oid = query.data.split("_", 2)[2]
         od = user_orders.get(user_id, {}).get(oid)
@@ -909,6 +895,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("✅ Ордер уже удалён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
 
+    elif query.data.startswith("order_") and not query.data.startswith("order_edit_") and not query.data.startswith("order_execute_") and not query.data.startswith("order_cancel_"):
+        oid = query.data.split("_", 1)[1]
+        od = user_orders.get(user_id, {}).get(oid)
+        if not od:
+            await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+            return
+        keyboard = [
+            [InlineKeyboardButton("✏️ Изменить цену", callback_data=f"order_edit_{oid}")],
+            [InlineKeyboardButton("⚡ Исполнить", callback_data=f"order_execute_{oid}")],
+            [InlineKeyboardButton("❌ Отменить", callback_data=f"order_cancel_{oid}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]
+        ]
+        await query.edit_message_text(f"Ордер #{oid[:8]}\n{od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f} ({od['time_in_force']})", reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
@@ -945,7 +945,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Введите комментарий для актива {prompt_name} (например, один из ведущих тех-гигантов):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
-    elif user_states.get(user_id, "").startswith("waiting_for_comment_"):
+    elif user_states.get(user_id) and user_states[user_id].startswith("waiting_for_comment_"):
         parts = user_states[user_id].split("_", 3)
         if len(parts) >= 4:
             ticker = parts[3]
