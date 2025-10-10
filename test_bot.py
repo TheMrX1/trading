@@ -786,7 +786,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Запрос цены для лимитки
             ctx["step"] = "price"
-            await query.edit_message_text("Введите лимитную цену:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+            back_to = ctx.get("back_to") or (f"asset_{ticker}" if ticker else "my_portfolio")
+            await query.edit_message_text("Введите лимитную цену:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
 
     elif query.data == "trade_manual":
         ctx = user_trade_context.get(user_id)
@@ -795,7 +796,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         ctx["action"] = "manual_buy"
         ctx["step"] = "price_manual"
-        await query.edit_message_text("Введите цену, по которой вы ранее купили актив:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+        back_to = ctx.get("back_to") or (f"asset_{ctx.get('ticker')}" if ctx.get('ticker') else "my_portfolio")
+        await query.edit_message_text("Введите цену, по которой вы ранее купили актив:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -813,13 +815,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("buy_") or query.data == "buy_start":
         ticker = query.data.split("_", 1)[1] if "_" in query.data else None
-        user_trade_context[user_id] = {"action": "buy", "ticker": ticker, "step": "qty"}
-        await query.edit_message_text("Введите количество акций для покупки:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+        back_to = f"asset_{ticker}" if ticker else "my_portfolio"
+        user_trade_context[user_id] = {"action": "buy", "ticker": ticker, "step": "qty", "back_to": back_to}
+        await query.edit_message_text("Введите количество акций для покупки:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
 
     elif query.data.startswith("sell_") or query.data == "sell_start":
         ticker = query.data.split("_", 1)[1] if "_" in query.data else None
-        user_trade_context[user_id] = {"action": "sell", "ticker": ticker, "step": "qty"}
-        await query.edit_message_text("Введите количество акций для продажи:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+        back_to = f"asset_{ticker}" if ticker else "my_portfolio"
+        user_trade_context[user_id] = {"action": "sell", "ticker": ticker, "step": "qty", "back_to": back_to}
+        await query.edit_message_text("Введите количество акций для продажи:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
 
     elif query.data == "orders_open":
         orders = user_orders.get(user_id, {})
@@ -990,13 +994,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         ctx["qty"] = qty
         ctx["step"] = "price_mode"
-        keyboard = [
-            [InlineKeyboardButton("Market price", callback_data="trade_market")],
-            [InlineKeyboardButton("LP till today", callback_data="trade_day")],
-            [InlineKeyboardButton("LP till canceled", callback_data="trade_gtc")],
-            [InlineKeyboardButton("Already bought", callback_data="trade_manual")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]
-        ]
+        back_to = ctx.get("back_to") or (f"asset_{ctx.get('ticker')}" if ctx.get('ticker') else "my_portfolio")
+        if ctx.get("action") == "sell":
+            keyboard = [
+                [InlineKeyboardButton("Market price", callback_data="trade_market")],
+                [InlineKeyboardButton("LP till today", callback_data="trade_day")],
+                [InlineKeyboardButton("LP till canceled", callback_data="trade_gtc")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("Market price", callback_data="trade_market")],
+                [InlineKeyboardButton("LP till today", callback_data="trade_day")],
+                [InlineKeyboardButton("LP till canceled", callback_data="trade_gtc")],
+                [InlineKeyboardButton("Already bought", callback_data="trade_manual")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]
+            ]
         await update.message.reply_text("Выберите режим исполнения:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     # Ввод цены для лимитного ордера (после выбора режима) или редактирования ордера
