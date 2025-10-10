@@ -846,6 +846,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = [
             [InlineKeyboardButton("✏️ Изменить цену", callback_data=f"order_edit_{oid}")],
+            [InlineKeyboardButton("⚡ Исполнить", callback_data=f"order_execute_{oid}")],
             [InlineKeyboardButton("❌ Отменить", callback_data=f"order_cancel_{oid}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]
         ]
@@ -861,15 +862,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx.update({"action": "edit_order", "oid": oid, "step": "price"})
         await query.edit_message_text("Введите новую цену для ордера:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"order_{oid}")]]))
 
-    elif query.data.startswith("order_cancel_"):
+    elif query.data.startswith("order_execute_"):
         oid = query.data.split("_", 2)[2]
         od = user_orders.get(user_id, {}).get(oid)
         if not od:
             await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
             return
+        
+        # Исполняем ордер по указанной цене
+        ticker = od["ticker"]
+        qty = od["qty"]
+        price = od["price"]
+        action = od["side"]
+        
+        if action == "buy":
+            pos = user_portfolio.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
+            total_cost = pos["avg_price"] * pos["qty"] + price * qty
+            pos["qty"] += qty
+            pos["avg_price"] = total_cost / max(pos["qty"], 1)
+        else:  # sell
+            pos = user_portfolio.setdefault(user_id, {}).get(ticker)
+            if not pos or pos.get("qty", 0) <= 0:
+                await query.edit_message_text("❌ Нечего продавать.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+                return
+            sell_qty = min(qty, pos["qty"])
+            pos["qty"] -= sell_qty
+            if pos["qty"] == 0:
+                pos["avg_price"] = 0.0
+                try:
+                    del user_portfolio[user_id][ticker]
+                except Exception:
+                    pass
+        
+        # Удаляем исполненный ордер
         del user_orders[user_id][oid]
         save_user_data()
-        await query.edit_message_text("✅ Ордер отменён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+        await query.edit_message_text(f"✅ Ордер исполнен: {action} {ticker} {qty} @ {price:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+
+    elif query.data.startswith("order_cancel_"):
+        oid = query.data.split("_", 2)[2]
+        # Удаляем ордер в любом случае, даже если его нет
+        if user_id in user_orders and oid in user_orders[user_id]:
+            del user_orders[user_id][oid]
+            save_user_data()
+            await query.edit_message_text("✅ Ордер отменён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+        else:
+            await query.edit_message_text("✅ Ордер уже удалён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
