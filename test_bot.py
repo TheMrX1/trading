@@ -346,12 +346,24 @@ def build_info_text(ticker, user_id=None):
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
     # Пытаемся взять максимально актуальную цену и время с fast_info
-    # Получаем максимально актуальные данные
-    rt_price, rt_ts = get_realtime_quote(ticker)
-    if rt_price is not None and rt_ts is not None:
-        price = round(float(rt_price), 4)
-        ts = rt_ts
-    else:
+    # Получаем максимально актуальные данные через fast_info; фолбэк — history
+    fi = getattr(stock, "fast_info", {}) or {}
+    fast_price = fi.get("last_price")
+    market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+    ts = None
+    price = None
+    if market_ts is not None:
+        try:
+            ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
+        except Exception:
+            ts = None
+    if fast_price is not None and ts is not None:
+        try:
+            price = round(float(fast_price), 4)
+        except Exception:
+            price = None
+
+    if price is None or ts is None:
         last = df.iloc[-1]
         price = round(float(last[price_column]), 4)
         idx_ts = last.name
@@ -672,7 +684,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_value, source_url = fetch_consensus_target(ticker)
             if target_value is None:
                 raise Exception("Средняя целевая цена недоступна")
-            current_price, current_ts = get_realtime_quote(ticker)
+            fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+            current_price = fi.get("last_price")
+            if current_price is None:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                    current_price = float(hist[price_column].iloc[-1])
             diff_text = ""
             if current_price:
                 diff = ((target_value - current_price) / current_price) * 100
