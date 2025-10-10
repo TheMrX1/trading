@@ -1,4 +1,6 @@
 import logging
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import yfinance as yf
 import numpy as np
 import os
@@ -306,9 +308,29 @@ def build_info_text(ticker, user_id=None):
 
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
-    last = df.iloc[-1]
-    price = round(float(last[price_column]), 4)
-    ts = last.name.to_pydatetime()
+    # Пытаемся взять максимально актуальную цену и время с fast_info
+    fi = getattr(stock, "fast_info", {})
+    fast_price = fi.get("last_price")
+    market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+
+    ts = None
+    price = None
+    if market_ts is not None:
+        try:
+            ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
+        except Exception:
+            ts = None
+    if fast_price is not None and ts is not None:
+        try:
+            price = round(float(fast_price), 4)
+        except Exception:
+            price = None
+
+    if price is None or ts is None:
+        last = df.iloc[-1]
+        price = round(float(last[price_column]), 4)
+        idx_ts = last.name
+        ts = idx_ts.to_pydatetime() if hasattr(idx_ts, "to_pydatetime") else datetime.fromtimestamp(idx_ts.timestamp(), tz=timezone.utc)
 
     look = df.tail(100) if len(df) >= 100 else df
     avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
@@ -326,7 +348,8 @@ def build_info_text(ticker, user_id=None):
     if not company_name:
         company_name = get_company_name(ticker)
     info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
-    info.append(f"🕒 Последнее обновление: {ts.strftime('%Y-%m-%d %H:%M')}")
+    ts_msk = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
+    info.append(f"🕒 Последнее обновление (MSK): {ts_msk.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
     recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
     recommendation_parts = []
@@ -385,7 +408,8 @@ def build_info_text(ticker, user_id=None):
         
     if big:
         ts_big, vol_big = big
-        info.append(f"🚀 Последняя крупная покупка: {ts_big.strftime('%Y-%m-%d %H:%M')}, объём {vol_big}")
+        ts_big_msk = (ts_big if ts_big.tzinfo else ts_big.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
+        info.append(f"🚀 Последняя крупная покупка: {ts_big_msk.strftime('%Y-%m-%d %H:%M')}, объём {vol_big}")
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
@@ -728,7 +752,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             blacklist[ticker] = {"user_id": user_id, "comment": comment}
             
             save_blacklist()
-            # Сначала уведомляем, затем удаляем актив у пользователей
             await notify_users_about_blacklist(context, ticker, user_id, comment)
             remove_asset_from_all_users(ticker)
             save_user_data()
@@ -982,7 +1005,6 @@ def fetch_risk_free_rate():
         if not hist.empty:
             latest = hist["Close"].dropna()
             if not latest.empty:
-                # ^TNX публикуется в десятикратном масштабе (45.67 = 4.567%)
                 return float(latest.iloc[-1]) / 1000.0, "https://finance.yahoo.com/quote/%5ETNX"
     except Exception:
         pass
@@ -1127,7 +1149,6 @@ def calculate_dcf_valuation(ticker):
 def fetch_consensus_target(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info
-    # Берём среднюю целевую цену, затем медиану, затем high как запасной вариант
     target = info.get("targetMeanPrice") or info.get("targetMedianPrice") or info.get("targetHighPrice")
     source = f"https://finance.yahoo.com/quote/{ticker}"
     if target is None:
