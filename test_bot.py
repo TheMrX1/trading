@@ -768,7 +768,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 pos = user_portfolio.setdefault(user_id, {}).get(ticker)
                 if not pos or pos.get("qty", 0) <= 0:
-                    await query.edit_message_text("❌ Нечего продавать.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+                    ctx = user_trade_context.get(user_id, {})
+                    back_to = ctx.get("back_to") or (f"asset_{ticker}" if ticker else "my_portfolio")
+                    await query.edit_message_text("❌ Нечего продавать.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
                     return
                 sell_qty = min(qty, pos["qty"])
                 pos["qty"] -= sell_qty
@@ -851,17 +853,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("order_edit_"):
         oid = query.data.split("_", 2)[2]
+        od = user_orders.get(user_id, {}).get(oid)
+        if not od:
+            await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+            return
         ctx = user_trade_context.setdefault(user_id, {})
         ctx.update({"action": "edit_order", "oid": oid, "step": "price"})
         await query.edit_message_text("Введите новую цену для ордера:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"order_{oid}")]]))
 
     elif query.data.startswith("order_cancel_"):
         oid = query.data.split("_", 2)[2]
-        if user_id in user_orders and oid in user_orders[user_id]:
-            del user_orders[user_id][oid]
-            await query.edit_message_text("✅ Ордер отменён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
-        else:
+        od = user_orders.get(user_id, {}).get(oid)
+        if not od:
             await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+            return
+        del user_orders[user_id][oid]
+        save_user_data()
+        await query.edit_message_text("✅ Ордер отменён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
