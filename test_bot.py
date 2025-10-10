@@ -70,6 +70,43 @@ def get_company_name(ticker):
     return name
 
 
+def get_realtime_quote(ticker: str):
+    stock = yf.Ticker(ticker)
+
+    try:
+        fi = getattr(stock, "fast_info", {}) or {}
+        fi_price = fi.get("last_price")
+        fi_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+        if fi_price is not None and fi_ts:
+            ts = datetime.fromtimestamp(int(fi_ts), tz=timezone.utc)
+            return float(fi_price), ts
+    except Exception:
+        pass
+
+    try:
+        h1m = stock.history(period="2d", interval="1m", prepost=True)
+        if h1m is not None and not h1m.empty:
+            pc = "Adj Close" if "Adj Close" in h1m.columns else "Close"
+            last = h1m.dropna().iloc[-1]
+            ts_i = last.name
+            ts = ts_i.to_pydatetime() if hasattr(ts_i, "to_pydatetime") else datetime.fromtimestamp(ts_i.timestamp(), tz=timezone.utc)
+            return float(last[pc]), ts
+    except Exception:
+        pass
+
+    try:
+        h5m = stock.history(period="5d", interval="5m", prepost=True)
+        if h5m is not None and not h5m.empty:
+            pc = "Adj Close" if "Adj Close" in h5m.columns else "Close"
+            last = h5m.dropna().iloc[-1]
+            ts_i = last.name
+            ts = ts_i.to_pydatetime() if hasattr(ts_i, "to_pydatetime") else datetime.fromtimestamp(ts_i.timestamp(), tz=timezone.utc)
+            return float(last[pc]), ts
+    except Exception:
+        pass
+
+    return None, None
+
 def get_display_name(ticker, user_id=None):
     ticker = ticker.upper()
     company_name = None
@@ -309,24 +346,12 @@ def build_info_text(ticker, user_id=None):
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
     # Пытаемся взять максимально актуальную цену и время с fast_info
-    fi = getattr(stock, "fast_info", {})
-    fast_price = fi.get("last_price")
-    market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
-
-    ts = None
-    price = None
-    if market_ts is not None:
-        try:
-            ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
-        except Exception:
-            ts = None
-    if fast_price is not None and ts is not None:
-        try:
-            price = round(float(fast_price), 4)
-        except Exception:
-            price = None
-
-    if price is None or ts is None:
+    # Получаем максимально актуальные данные
+    rt_price, rt_ts = get_realtime_quote(ticker)
+    if rt_price is not None and rt_ts is not None:
+        price = round(float(rt_price), 4)
+        ts = rt_ts
+    else:
         last = df.iloc[-1]
         price = round(float(last[price_column]), 4)
         idx_ts = last.name
@@ -647,13 +672,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_value, source_url = fetch_consensus_target(ticker)
             if target_value is None:
                 raise Exception("Средняя целевая цена недоступна")
-            stock = yf.Ticker(ticker)
-            current_price = stock.fast_info.get("last_price") if hasattr(stock, "fast_info") else None
-            if current_price is None:
-                hist = stock.history(period="5d")
-                if not hist.empty:
-                    price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
-                    current_price = float(hist[price_column].iloc[-1])
+            current_price, current_ts = get_realtime_quote(ticker)
             diff_text = ""
             if current_price:
                 diff = ((target_value - current_price) / current_price) * 100
