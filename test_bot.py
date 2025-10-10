@@ -378,12 +378,15 @@ def build_info_text(ticker, user_id=None):
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
     # Пытаемся взять максимально актуальную цену и время с fast_info
-    fi = getattr(stock, "fast_info", {})
+    fi = getattr(stock, "fast_info", {}) or {}
     fast_price = fi.get("last_price")
     market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+    fast_volume = fi.get("last_volume")
 
     ts = None
     price = None
+    volume = None
+    
     if market_ts is not None:
         try:
             ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
@@ -394,12 +397,21 @@ def build_info_text(ticker, user_id=None):
             price = round(float(fast_price), 4)
         except Exception:
             price = None
+    if fast_volume is not None:
+        try:
+            volume = int(fast_volume)
+        except Exception:
+            volume = None
 
     if price is None or ts is None:
         last = df.iloc[-1]
         price = round(float(last[price_column]), 4)
         idx_ts = last.name
         ts = idx_ts.to_pydatetime() if hasattr(idx_ts, "to_pydatetime") else datetime.fromtimestamp(idx_ts.timestamp(), tz=timezone.utc)
+    
+    if volume is None:
+        last = df.iloc[-1]
+        volume = int(last['Volume'])
 
     look = df.tail(100) if len(df) >= 100 else df
     avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
@@ -436,7 +448,7 @@ def build_info_text(ticker, user_id=None):
         info.append(f"📈 Оценка аналитиков: {recommendation_line}\nИсточник: {rec_source}")
     elif rec_source:
         info.append(f"📈 Оценка аналитиков: данные недоступны\nИсточник: {rec_source}")
-    info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {int(last['Volume'])}")
+    info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {volume}")
     
     cycle_periods = [
         (5, "5 дней", "5m"),
