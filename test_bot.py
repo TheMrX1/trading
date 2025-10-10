@@ -136,6 +136,13 @@ async def show_assets_menu(query, user_id, page=0):
 
 async def show_portfolio_menu(query, user_id):
     positions = user_portfolio.get(user_id, {})
+    # Удаляем нулевые позиции из хранения
+    tickers_to_delete = [t for t, p in positions.items() if p.get("qty", 0) <= 0]
+    for t in tickers_to_delete:
+        try:
+            del positions[t]
+        except Exception:
+            pass
     orders = user_orders.get(user_id, {})
     lines = ["💼 Мой портфель:\n"]
     if not positions:
@@ -173,7 +180,6 @@ async def show_portfolio_menu(query, user_id):
             lines.append(f"#{oid[:8]} {od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f} ({od['time_in_force']})")
 
     keyboard = [
-        [InlineKeyboardButton("➕ Купить", callback_data="buy_start"), InlineKeyboardButton("➖ Продать", callback_data="sell_start")],
         [InlineKeyboardButton("📜 opened orders", callback_data="orders_open")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
@@ -759,12 +765,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pos["qty"] -= sell_qty
                 if pos["qty"] == 0:
                     pos["avg_price"] = 0.0
+                    # Удаляем пустую позицию
+                    try:
+                        del user_portfolio[user_id][ticker]
+                    except Exception:
+                        pass
             await query.edit_message_text(f"✅ Исполнено по рынку: {action} {ticker} {qty} @ {price_exec:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
             user_trade_context.pop(user_id, None)
         else:
             # Запрос цены для лимитки
             ctx["step"] = "price"
             await query.edit_message_text("Введите лимитную цену:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+
+    elif query.data == "trade_manual":
+        ctx = user_trade_context.get(user_id)
+        if not ctx or "qty" not in ctx:
+            await query.edit_message_text("Сессия сделки не найдена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+            return
+        ctx["action"] = "manual_buy"
+        ctx["step"] = "price_manual"
+        await query.edit_message_text("Введите цену, по которой вы ранее купили актив:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -963,6 +983,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Market price", callback_data="trade_market")],
             [InlineKeyboardButton("LP till today", callback_data="trade_day")],
             [InlineKeyboardButton("LP till canceled", callback_data="trade_gtc")],
+            [InlineKeyboardButton("Already bought", callback_data="trade_manual")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]
         ]
         await update.message.reply_text("Выберите режим исполнения:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -990,6 +1011,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx['tif']})")
         user_trade_context.pop(user_id, None)
+
+    elif user_id in user_trade_context and user_trade_context.get(user_id, {}).get("step") == "price_manual":
+        ctx = user_trade_context[user_id]
+        try:
+            price = float(update.message.text.strip().replace(",", "."))
+            if price <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("❌ Некорректная цена. Введите положительное число:")
+            return
+        qty = ctx.get("qty", 0)
+        if qty <= 0:
+            await update.message.reply_text("❌ Некорректное количество.")
+            user_trade_context.pop(user_id, None)
+            return
+        ticker = ctx.get("ticker") or "UNKNOWN"
+        pos = user_portfolio.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
+        total_cost = pos["avg_price"] * pos["qty"] + price * qty
+        pos["qty"] += qty
+        pos["avg_price"] = total_cost / max(pos["qty"], 1)
+        user_trade_context.pop(user_id, None)
+        await update.message.reply_text(f"✅ Добавлено в портфель: {ticker} {qty} @ {price:.2f}")
 
 
 def load_user_data():
