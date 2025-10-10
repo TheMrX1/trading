@@ -148,6 +148,7 @@ async def show_portfolio_menu(query, user_id):
     if not positions:
         lines.append("Пока нет позиций.")
     else:
+        total_change = 0.0
         for ticker, pos in positions.items():
             qty = pos.get("qty", 0)
             avg_price = pos.get("avg_price", 0.0)
@@ -168,10 +169,18 @@ async def show_portfolio_menu(query, user_id):
                 except Exception:
                     current = None
             change_value = (current - avg_price) * qty if (current is not None) else 0.0
+            total_change += change_value
             lines.append(f"• {name}, {qty} шт, {avg_price:.2f} -> { (current or 0.0):.2f} ({change_value:+.2f} USD)")
             lines.append("")
+        lines.append(f"total: {total_change:+.2f} USD")
+        lines.append("")
 
     # Открытые ордера
+    # Разделитель, если нет и позиций, и ордеров
+    orders = user_orders.get(user_id, {})
+    if not positions and not orders:
+        lines.append("\n-----------\n")
+
     lines.append("🧾 Opened orders:\n")
     if not orders:
         lines.append("Нет открытых ордеров.")
@@ -770,8 +779,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         del user_portfolio[user_id][ticker]
                     except Exception:
                         pass
+            save_user_data()
             await query.edit_message_text(f"✅ Исполнено по рынку: {action} {ticker} {qty} @ {price_exec:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
             user_trade_context.pop(user_id, None)
+            await query.message.reply_text("Главное меню:", reply_markup=main_menu())
         else:
             # Запрос цены для лимитки
             ctx["step"] = "price"
@@ -1009,8 +1020,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "time_in_force": ctx["tif"],
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx['tif']})")
-        user_trade_context.pop(user_id, None)
+            save_user_data()
+            await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx['tif']})")
+            user_trade_context.pop(user_id, None)
+            await update.message.reply_text("Главное меню:", reply_markup=main_menu())
 
     elif user_id in user_trade_context and user_trade_context.get(user_id, {}).get("step") == "price_manual":
         ctx = user_trade_context[user_id]
@@ -1031,13 +1044,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_cost = pos["avg_price"] * pos["qty"] + price * qty
         pos["qty"] += qty
         pos["avg_price"] = total_cost / max(pos["qty"], 1)
+        save_user_data()
         user_trade_context.pop(user_id, None)
         await update.message.reply_text(f"✅ Добавлено в портфель: {ticker} {qty} @ {price:.2f}")
+        await update.message.reply_text("Главное меню:", reply_markup=main_menu())
 
 
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache
+    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache, user_portfolio, user_orders
     try:
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
@@ -1061,6 +1076,8 @@ def load_user_data():
                 user_assets[current_user_id] = []
                 user_comments[current_user_id] = {}
                 user_asset_names[current_user_id] = {}
+                user_portfolio[current_user_id] = {}
+                user_orders[current_user_id] = {}
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -1073,6 +1090,10 @@ def load_user_data():
                 current_section = "comments"
             elif line.startswith("NAMES:") and current_user_id:
                 current_section = "names"
+            elif line.startswith("PORTFOLIO:") and current_user_id:
+                current_section = "portfolio"
+            elif line.startswith("ORDERS:") and current_user_id:
+                current_section = "orders"
             elif line.startswith("SETTINGS:") and current_user_id:
                 current_section = "settings"
             elif current_section == "assets" and current_user_id:
@@ -1102,6 +1123,35 @@ def load_user_data():
                         ticker, name = line.split("=", 1)
                         user_asset_names[current_user_id][ticker] = name
                         ticker_name_cache[ticker] = name
+            elif current_section == "portfolio" and current_user_id:
+                if line == "END_PORTFOLIO":
+                    current_section = None
+                else:
+                    if "=" in line and "," in line:
+                        t, rest = line.split("=", 1)
+                        q_str, ap_str = rest.split(",", 1)
+                        try:
+                            user_portfolio[current_user_id][t] = {"qty": int(q_str), "avg_price": float(ap_str)}
+                        except Exception:
+                            pass
+            elif current_section == "orders" and current_user_id:
+                if line == "END_ORDERS":
+                    current_section = None
+                else:
+                    parts = line.split("|")
+                    if len(parts) >= 7:
+                        oid, t, side, q, p, tif, created = parts[:7]
+                        try:
+                            user_orders[current_user_id][oid] = {
+                                "ticker": t,
+                                "side": side,
+                                "qty": int(q),
+                                "price": float(p),
+                                "time_in_force": tif,
+                                "created_at": created
+                            }
+                        except Exception:
+                            pass
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
         user_assets = {}
@@ -1109,6 +1159,8 @@ def load_user_data():
         user_asset_names = {}
         user_settings = {}
         ticker_name_cache = {}
+        user_portfolio = {}
+        user_orders = {}
 
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
@@ -1135,6 +1187,18 @@ def save_user_data():
                 for ticker, name in names.items():
                     f.write(f"{ticker}={name}\n")
                 f.write("END_NAMES\n")
+
+                f.write("PORTFOLIO:\n")
+                portfolio = user_portfolio.get(user_id, {})
+                for t, pos in portfolio.items():
+                    f.write(f"{t}={pos.get('qty', 0)},{pos.get('avg_price', 0.0)}\n")
+                f.write("END_PORTFOLIO\n")
+
+                f.write("ORDERS:\n")
+                orders = user_orders.get(user_id, {})
+                for oid, od in orders.items():
+                    f.write(f"{oid}|{od['ticker']}|{od['side']}|{od['qty']}|{od['price']}|{od['time_in_force']}|{od['created_at']}\n")
+                f.write("END_ORDERS\n")
 
                 f.write("SETTINGS:\n")
                 settings = {
