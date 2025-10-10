@@ -999,7 +999,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text("Выберите режим исполнения:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # Ввод цены для лимитного ордера (после выбора режима)
+    # Ввод цены для лимитного ордера (после выбора режима) или редактирования ордера
     elif user_id in user_trade_context and user_trade_context.get(user_id, {}).get("step") == "price":
         ctx = user_trade_context[user_id]
         try:
@@ -1010,18 +1010,32 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Некорректная цена. Введите положительное число:")
             return
         ctx["price"] = price
-        # Регистрируем ордер
-        oid = str(uuid.uuid4())
-        user_orders.setdefault(user_id, {})[oid] = {
-            "ticker": ctx.get("ticker") or "UNKNOWN",
-            "side": ctx["action"],
-            "qty": ctx["qty"],
-            "price": price,
-            "time_in_force": ctx["tif"],
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
+
+        # Редактирование существующего ордера
+        if ctx.get("action") == "edit_order" and ctx.get("oid"):
+            oid = ctx["oid"]
+            od = user_orders.get(user_id, {}).get(oid)
+            if not od:
+                await update.message.reply_text("❌ Ордер не найден.")
+            else:
+                od["price"] = price
+                save_user_data()
+                await update.message.reply_text(f"✏️ Цена ордера #{oid[:8]} обновлена на {price:.2f}")
+            user_trade_context.pop(user_id, None)
+            await update.message.reply_text("Главное меню:", reply_markup=main_menu())
+        else:
+            # Регистрируем новый лимитный ордер
+            oid = str(uuid.uuid4())
+            user_orders.setdefault(user_id, {})[oid] = {
+                "ticker": ctx.get("ticker") or "UNKNOWN",
+                "side": ctx["action"],
+                "qty": ctx["qty"],
+                "price": price,
+                "time_in_force": ctx.get("tif", "DAY"),
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
             save_user_data()
-            await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx['tif']})")
+            await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx.get('tif','DAY')})")
             user_trade_context.pop(user_id, None)
             await update.message.reply_text("Главное меню:", reply_markup=main_menu())
 
