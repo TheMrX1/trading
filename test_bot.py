@@ -387,28 +387,39 @@ def build_info_text(ticker, user_id=None):
     price = None
     volume = None
     
+    # Сначала пытаемся получить цену из fast_info (как в портфеле)
+    if fast_price is not None:
+        try:
+            price = round(float(fast_price), 4)
+        except Exception:
+            price = None
+    
+    # Затем пытаемся получить время из fast_info
     if market_ts is not None:
         try:
             ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
         except Exception:
             ts = None
-    if fast_price is not None and ts is not None:
-        try:
-            price = round(float(fast_price), 4)
-        except Exception:
-            price = None
+    
+    # Получаем объем из fast_info
     if fast_volume is not None:
         try:
             volume = int(fast_volume)
         except Exception:
             volume = None
 
-    if price is None or ts is None:
+    # Fallback к историческим данным если цена не получена
+    if price is None:
         last = df.iloc[-1]
         price = round(float(last[price_column]), 4)
+    
+    # Fallback к историческим данным если время не получено
+    if ts is None:
+        last = df.iloc[-1]
         idx_ts = last.name
         ts = idx_ts.to_pydatetime() if hasattr(idx_ts, "to_pydatetime") else datetime.fromtimestamp(idx_ts.timestamp(), tz=timezone.utc)
     
+    # Fallback к историческим данным если объем не получен
     if volume is None:
         last = df.iloc[-1]
         volume = int(last['Volume'])
