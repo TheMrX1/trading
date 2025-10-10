@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import uuid
 import yfinance as yf
 import numpy as np
 import os
@@ -43,6 +44,13 @@ user_names_cache = {}
 
 blacklist = {}
 
+# Портфель и ордера
+user_portfolio = {}  # {user_id: {ticker: {"qty": int, "avg_price": float}}}
+user_orders = {}     # {user_id: {order_id: order_dict}}
+
+# Временный контекст для сделок
+user_trade_context = {}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -70,43 +78,6 @@ def get_company_name(ticker):
     return name
 
 
-def get_realtime_quote(ticker: str):
-    stock = yf.Ticker(ticker)
-
-    try:
-        fi = getattr(stock, "fast_info", {}) or {}
-        fi_price = fi.get("last_price")
-        fi_ts = fi.get("last_market_time") or fi.get("last_trading_time")
-        if fi_price is not None and fi_ts:
-            ts = datetime.fromtimestamp(int(fi_ts), tz=timezone.utc)
-            return float(fi_price), ts
-    except Exception:
-        pass
-
-    try:
-        h1m = stock.history(period="2d", interval="1m", prepost=True)
-        if h1m is not None and not h1m.empty:
-            pc = "Adj Close" if "Adj Close" in h1m.columns else "Close"
-            last = h1m.dropna().iloc[-1]
-            ts_i = last.name
-            ts = ts_i.to_pydatetime() if hasattr(ts_i, "to_pydatetime") else datetime.fromtimestamp(ts_i.timestamp(), tz=timezone.utc)
-            return float(last[pc]), ts
-    except Exception:
-        pass
-
-    try:
-        h5m = stock.history(period="5d", interval="5m", prepost=True)
-        if h5m is not None and not h5m.empty:
-            pc = "Adj Close" if "Adj Close" in h5m.columns else "Close"
-            last = h5m.dropna().iloc[-1]
-            ts_i = last.name
-            ts = ts_i.to_pydatetime() if hasattr(ts_i, "to_pydatetime") else datetime.fromtimestamp(ts_i.timestamp(), tz=timezone.utc)
-            return float(last[pc]), ts
-    except Exception:
-        pass
-
-    return None, None
-
 def get_display_name(ticker, user_id=None):
     ticker = ticker.upper()
     company_name = None
@@ -127,6 +98,7 @@ def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
+        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
          InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
@@ -161,6 +133,51 @@ async def show_assets_menu(query, user_id, page=0):
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     await query.edit_message_text("Ваши активы:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_portfolio_menu(query, user_id):
+    positions = user_portfolio.get(user_id, {})
+    orders = user_orders.get(user_id, {})
+    lines = ["💼 Мой портфель:\n"]
+    if not positions:
+        lines.append("Пока нет позиций.")
+    else:
+        for ticker, pos in positions.items():
+            qty = pos.get("qty", 0)
+            avg_price = pos.get("avg_price", 0.0)
+            name = get_display_name(ticker, user_id)
+            # текующая цена
+            current = None
+            try:
+                fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+                current = fi.get("last_price")
+            except Exception:
+                current = None
+            if current is None:
+                try:
+                    hist = yf.Ticker(ticker).history(period="5d")
+                    if not hist.empty:
+                        pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                        current = float(hist[pc].iloc[-1])
+                except Exception:
+                    current = None
+            change_value = (current - avg_price) * qty if (current is not None) else 0.0
+            lines.append(f"• {name}, {qty} шт, {avg_price:.2f} -> { (current or 0.0):.2f} ({change_value:+.2f} USD)")
+            lines.append("")
+
+    # Открытые ордера
+    lines.append("🧾 Opened orders:\n")
+    if not orders:
+        lines.append("Нет открытых ордеров.")
+    else:
+        for oid, od in orders.items():
+            lines.append(f"#{oid[:8]} {od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f} ({od['time_in_force']})")
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Купить", callback_data="buy_start"), InlineKeyboardButton("➖ Продать", callback_data="sell_start")],
+        [InlineKeyboardButton("📜 opened orders", callback_data="orders_open")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
+    ]
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 def classify_cycle(df):
     df = df.copy()
@@ -346,10 +363,10 @@ def build_info_text(ticker, user_id=None):
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
     # Пытаемся взять максимально актуальную цену и время с fast_info
-    # Получаем максимально актуальные данные через fast_info; фолбэк — history
-    fi = getattr(stock, "fast_info", {}) or {}
+    fi = getattr(stock, "fast_info", {})
     fast_price = fi.get("last_price")
     market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+
     ts = None
     price = None
     if market_ts is not None:
@@ -482,6 +499,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_assets_menu(query, user_id, page=0)
 
+    elif query.data == "my_portfolio":
+        await show_portfolio_menu(query, user_id)
+
     elif query.data == "group_assets":
         keyboard = []
         has_assets = False
@@ -560,6 +580,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
             [InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calc_{ticker}")],
+            [InlineKeyboardButton("➕ Купить", callback_data=f"buy_{ticker}"), InlineKeyboardButton("➖ Продать", callback_data=f"sell_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
         await query.edit_message_text(f"Актив {display_name}\nКомментарий: {comment}", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -684,10 +705,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_value, source_url = fetch_consensus_target(ticker)
             if target_value is None:
                 raise Exception("Средняя целевая цена недоступна")
-            fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
-            current_price = fi.get("last_price")
+            stock = yf.Ticker(ticker)
+            current_price = stock.fast_info.get("last_price") if hasattr(stock, "fast_info") else None
             if current_price is None:
-                hist = yf.Ticker(ticker).history(period="5d")
+                hist = stock.history(period="5d")
                 if not hist.empty:
                     price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
                     current_price = float(hist[price_column].iloc[-1])
@@ -699,6 +720,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка при получении цели для {ticker}: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"calc_{ticker}")]]))
+
+    elif query.data in ("trade_market", "trade_day", "trade_gtc"):
+        ctx = user_trade_context.get(user_id)
+        if not ctx or "qty" not in ctx:
+            await query.edit_message_text("Сессия сделки не найдена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+            return
+        action = ctx["action"]
+        qty = ctx["qty"]
+        ticker = ctx.get("ticker")
+        tif = {"trade_market": "MARKET", "trade_day": "DAY", "trade_gtc": "GTC"}[query.data]
+        ctx["tif"] = tif
+        if tif == "MARKET":
+            # Исполнение по рынку: обновляем портфель сразу
+            price_exec = None
+            try:
+                fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+                price_exec = fi.get("last_price")
+            except Exception:
+                price_exec = None
+            if price_exec is None:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                    price_exec = float(hist[pc].iloc[-1])
+            price_exec = float(price_exec or 0.0)
+            if action == "buy":
+                pos = user_portfolio.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
+                total_cost = pos["avg_price"] * pos["qty"] + price_exec * qty
+                pos["qty"] += qty
+                pos["avg_price"] = total_cost / max(pos["qty"], 1)
+            else:
+                pos = user_portfolio.setdefault(user_id, {}).get(ticker)
+                if not pos or pos.get("qty", 0) <= 0:
+                    await query.edit_message_text("❌ Нечего продавать.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+                    return
+                sell_qty = min(qty, pos["qty"])
+                pos["qty"] -= sell_qty
+                if pos["qty"] == 0:
+                    pos["avg_price"] = 0.0
+            await query.edit_message_text(f"✅ Исполнено по рынку: {action} {ticker} {qty} @ {price_exec:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+            user_trade_context.pop(user_id, None)
+        else:
+            # Запрос цены для лимитки
+            ctx["step"] = "price"
+            await query.edit_message_text("Введите лимитную цену:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
@@ -713,6 +779,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text(f"Введите комментарий для добавления {ticker} (актив в черном списке!):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("buy_") or query.data == "buy_start":
+        ticker = query.data.split("_", 1)[1] if "_" in query.data else None
+        user_trade_context[user_id] = {"action": "buy", "ticker": ticker, "step": "qty"}
+        await query.edit_message_text("Введите количество акций для покупки:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+
+    elif query.data.startswith("sell_") or query.data == "sell_start":
+        ticker = query.data.split("_", 1)[1] if "_" in query.data else None
+        user_trade_context[user_id] = {"action": "sell", "ticker": ticker, "step": "qty"}
+        await query.edit_message_text("Введите количество акций для продажи:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+
+    elif query.data == "orders_open":
+        orders = user_orders.get(user_id, {})
+        if not orders:
+            await query.edit_message_text("Нет открытых ордеров.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
+            return
+        keyboard = []
+        for oid, od in orders.items():
+            keyboard.append([InlineKeyboardButton(f"#{oid[:8]} {od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f}", callback_data=f"order_{oid}")])
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")])
+        await query.edit_message_text("Открытые ордера:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("order_"):
+        oid = query.data.split("_", 1)[1]
+        od = user_orders.get(user_id, {}).get(oid)
+        if not od:
+            await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+            return
+        keyboard = [
+            [InlineKeyboardButton("✏️ Изменить цену", callback_data=f"order_edit_{oid}")],
+            [InlineKeyboardButton("❌ Отменить", callback_data=f"order_cancel_{oid}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]
+        ]
+        await query.edit_message_text(f"Ордер #{oid[:8]}\n{od['side']} {od['ticker']} {od['qty']} @ {od['price']:.2f} ({od['time_in_force']})", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("order_edit_"):
+        oid = query.data.split("_", 2)[2]
+        ctx = user_trade_context.setdefault(user_id, {})
+        ctx.update({"action": "edit_order", "oid": oid, "step": "price"})
+        await query.edit_message_text("Введите новую цену для ордера:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"order_{oid}")]]))
+
+    elif query.data.startswith("order_cancel_"):
+        oid = query.data.split("_", 2)[2]
+        if user_id in user_orders and oid in user_orders[user_id]:
+            del user_orders[user_id][oid]
+            await query.edit_message_text("✅ Ордер отменён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
+        else:
+            await query.edit_message_text("Ордер не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="orders_open")]]))
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -832,6 +946,50 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
+
+    # Ввод количества для сделки
+    elif user_id in user_trade_context and user_trade_context.get(user_id, {}).get("step") == "qty":
+        ctx = user_trade_context[user_id]
+        try:
+            qty = int(update.message.text.strip())
+            if qty <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("❌ Некорректное количество. Введите положительное целое число:")
+            return
+        ctx["qty"] = qty
+        ctx["step"] = "price_mode"
+        keyboard = [
+            [InlineKeyboardButton("Market price", callback_data="trade_market")],
+            [InlineKeyboardButton("LP till today", callback_data="trade_day")],
+            [InlineKeyboardButton("LP till canceled", callback_data="trade_gtc")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]
+        ]
+        await update.message.reply_text("Выберите режим исполнения:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    # Ввод цены для лимитного ордера (после выбора режима)
+    elif user_id in user_trade_context and user_trade_context.get(user_id, {}).get("step") == "price":
+        ctx = user_trade_context[user_id]
+        try:
+            price = float(update.message.text.strip().replace(",", "."))
+            if price <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("❌ Некорректная цена. Введите положительное число:")
+            return
+        ctx["price"] = price
+        # Регистрируем ордер
+        oid = str(uuid.uuid4())
+        user_orders.setdefault(user_id, {})[oid] = {
+            "ticker": ctx.get("ticker") or "UNKNOWN",
+            "side": ctx["action"],
+            "qty": ctx["qty"],
+            "price": price,
+            "time_in_force": ctx["tif"],
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await update.message.reply_text(f"✅ Лимитный ордер создан: #{oid[:8]} {ctx['action']} {ctx.get('ticker') or 'UNKNOWN'} {ctx['qty']} @ {price:.2f} ({ctx['tif']})")
+        user_trade_context.pop(user_id, None)
 
 
 def load_user_data():
