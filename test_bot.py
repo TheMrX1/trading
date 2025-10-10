@@ -377,41 +377,31 @@ def build_info_text(ticker, user_id=None):
 
     price_column = "Adj Close" if "Adj Close" in df.columns else "Close"
 
-    # Пытаемся взять максимально актуальную цену и время с fast_info
-    fi = getattr(stock, "fast_info", {}) or {}
-    fast_price = fi.get("last_price")
-    market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
-    fast_volume = fi.get("last_volume")
-
+    # Получаем актуальную цену точно так же, как в портфеле
+    current_price = None
+    try:
+        fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+        current_price = fi.get("last_price")
+    except Exception:
+        current_price = None
+    if current_price is None:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if not hist.empty:
+                pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                current_price = float(hist[pc].iloc[-1])
+        except Exception:
+            current_price = None
+    
+    # Получаем время из fast_info
     ts = None
-    price = None
-    volume = None
-    
-    # Сначала пытаемся получить цену из fast_info (как в портфеле)
-    if fast_price is not None:
-        try:
-            price = round(float(fast_price), 4)
-        except Exception:
-            price = None
-    
-    # Затем пытаемся получить время из fast_info
-    if market_ts is not None:
-        try:
+    try:
+        fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+        market_ts = fi.get("last_market_time") or fi.get("last_trading_time")
+        if market_ts is not None:
             ts = datetime.fromtimestamp(int(market_ts), tz=timezone.utc)
-        except Exception:
-            ts = None
-    
-    # Получаем объем из fast_info
-    if fast_volume is not None:
-        try:
-            volume = int(fast_volume)
-        except Exception:
-            volume = None
-
-    # Fallback к историческим данным если цена не получена
-    if price is None:
-        last = df.iloc[-1]
-        price = round(float(last[price_column]), 4)
+    except Exception:
+        ts = None
     
     # Fallback к историческим данным если время не получено
     if ts is None:
@@ -419,10 +409,23 @@ def build_info_text(ticker, user_id=None):
         idx_ts = last.name
         ts = idx_ts.to_pydatetime() if hasattr(idx_ts, "to_pydatetime") else datetime.fromtimestamp(idx_ts.timestamp(), tz=timezone.utc)
     
+    # Получаем объем из fast_info
+    volume = None
+    try:
+        fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+        fast_volume = fi.get("last_volume")
+        if fast_volume is not None:
+            volume = int(fast_volume)
+    except Exception:
+        volume = None
+    
     # Fallback к историческим данным если объем не получен
     if volume is None:
         last = df.iloc[-1]
         volume = int(last['Volume'])
+    
+    # Используем полученную цену
+    price = round(current_price, 4) if current_price is not None else round(float(df[price_column].iloc[-1]), 4)
 
     look = df.tail(100) if len(df) >= 100 else df
     avg_vol = look["Volume"].mean() if len(look) > 0 else df["Volume"].mean()
