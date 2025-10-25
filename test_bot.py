@@ -5,11 +5,31 @@ import yfinance as yf
 import numpy as np
 import os
 from dotenv import load_dotenv
-import httpx
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lex_rank import LexRankSummarizer
-from sumy.utils import get_stop_words
+
+# Optional deps guarded: httpx and sumy
+try:
+    import httpx  # type: ignore
+except Exception:  # ImportError or others
+    httpx = None  # type: ignore
+
+try:
+    from sumy.parsers.plaintext import PlaintextParser  # type: ignore
+    from sumy.nlp.tokenizers import Tokenizer  # type: ignore
+    from sumy.summarizers.lex_rank import LexRankSummarizer  # type: ignore
+    from sumy.utils import get_stop_words  # type: ignore
+    _SUMY_AVAILABLE = True
+except Exception:
+    PlaintextParser = None  # type: ignore
+    Tokenizer = None  # type: ignore
+    LexRankSummarizer = None  # type: ignore
+    get_stop_words = None  # type: ignore
+    _SUMY_AVAILABLE = False
+
+# Fallback stdlib for HTTP if httpx is absent
+import urllib.request
+import urllib.parse
+import json
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -1389,12 +1409,19 @@ async def fetch_sector_news_gdelt(sector, limit=12, lang="ru"):
         "format": "json"
     }
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
-            if r.status_code != 200:
-                return []
-            data = r.json() or {}
-            arts = data.get("articles") or []
+        if httpx is not None:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
+                if r.status_code != 200:
+                    return []
+                data = r.json() or {}
+        else:
+            # Fallback to urllib (blocking) wrapped in thread via run_in_executor if needed
+            url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+        arts = data.get("articles") or []
     except Exception:
         return []
 
@@ -1434,18 +1461,20 @@ def summarize_with_sumy(items, sentences_count=6, language="russian"):
     text = "\n".join(parts)
 
     try:
-        parser = PlaintextParser.from_string(text, Tokenizer(language))
-        summarizer = LexRankSummarizer()
-        summarizer.stop_words = get_stop_words(language)
-        summary = summarizer(parser.document, sentences_count)
-        lines = [str(s) for s in summary if str(s).strip()]
-        # Если суммаризация получилась пустой, вернем топ-список
-        if not lines:
-            lines = [f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2]]
-            return "\n".join(lines)
-        return "\n".join(f"- {line}" for line in lines)
+        if _SUMY_AVAILABLE:
+            parser = PlaintextParser.from_string(text, Tokenizer(language))
+            summarizer = LexRankSummarizer()
+            summarizer.stop_words = get_stop_words(language)
+            summary = summarizer(parser.document, sentences_count)
+            lines = [str(s) for s in summary if str(s).strip()]
+            if not lines:
+                lines = [f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2]]
+                return "\n".join(lines)
+            return "\n".join(f"- {line}" for line in lines)
+        else:
+            # Если sumy недоступен — простой список
+            return "\n".join(f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2])
     except Exception:
-        # На случай непредвиденной ошибки — простой список
         return "\n".join(f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2])
 
 async def show_news_for_sector(query, user_id, sector):
