@@ -1013,7 +1013,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user_id] = None
         display_name = get_display_name(ticker, user_id)
         keyboard = [
-            [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
+            [InlineKeyboardButton("ℹ️ Информация", callback_data=f"infoany_{ticker}"),
              InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calcany_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
