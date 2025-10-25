@@ -1306,13 +1306,17 @@ def save_user_data():
                 f.write("END_PORTFOLIO\n")
 
                 f.write("SETTINGS:\n")
-                settings = {
+                # сохраняем настройки пользователя, включая news_sector при наличии
+                settings = user_settings.get(user_id, {}) or {}
+                # дефолты
+                defaults = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
                     "analysis_days": 5,
                     "cycle_tf": "5m"
                 }
-                for key, value in settings.items():
+                merged = {**defaults, **settings}
+                for key, value in merged.items():
                     f.write(f"{key}={value}\n")
                 f.write("END_SETTINGS\n")
                 f.write("\n")
@@ -1383,9 +1387,9 @@ def get_user_sector(user_id):
     return None
 
 async def fetch_sector_news_gdelt(sector, limit=12, lang="ru"):
-    # составляем запрос по сектору
+    # составляем расширенные запросы (EN+RU синонимы) и пробуем по очереди
     sector_map = {
-        "Technology": ["technology", "semiconductor", "software", "AI", "cloud"],
+        "Technology": ["technology", "tech", "semiconductor", "software", "AI", "cloud"],
         "Energy": ["energy", "oil", "gas"],
         "Financial Services": ["finance", "bank", "insurance", "fintech"],
         "Healthcare": ["healthcare", "biotech", "pharma"],
@@ -1396,56 +1400,76 @@ async def fetch_sector_news_gdelt(sector, limit=12, lang="ru"):
         "Materials": ["materials", "metals", "chemicals"],
         "Real Estate": ["real estate", "reit"],
     }
-    terms = sector_map.get(sector, [])
-    # если сектор произвольный — используем его как ключевое слово
-    query = sector if not terms else f"({sector}) OR (" + " OR ".join(terms) + ")"
-    query += " AND (market OR stocks OR finance)"
+    base_terms = sector_map.get(sector, []) + ([sector] if sector else [])
+    news_terms_en = ["market", "stocks", "finance", "earnings", "ipo", "investment", "economy", "report"]
+    news_terms_ru = ["рынок", "акции", "биржа", "финансы", "отчет", "отчёт", "прибыль", "убыток", "экономика", "новости"]
 
-    params = {
-        "query": query,
-        "timespan": "2w",
-        "maxrecords": str(min(limit * 3, 75)),
-        "sort": "DateDesc",
-        "format": "json"
-    }
-    try:
-        if httpx is not None:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
-                if r.status_code != 200:
-                    return []
-                data = r.json() or {}
-        else:
-            # Fallback to urllib (blocking) wrapped in thread via run_in_executor if needed
-            url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
-            with urllib.request.urlopen(url, timeout=20) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-        arts = data.get("articles") or []
-    except Exception:
-        return []
+    queries = []
+    if base_terms:
+        queries.append(f"((" + " OR ".join(base_terms) + ")) AND ((" + " OR ".join(news_terms_en + news_terms_ru) + "))")
+        queries.append("(" + " OR ".join(base_terms) + ")")
+    if sector and sector not in base_terms:
+        queries.append(sector)
+
+    async def fetch_once(q: str):
+        params = {
+            "query": q,
+            "timespan": "2w",
+            "maxrecords": "100",
+            "sort": "DateDesc",
+            "mode": "ArtList",
+            "format": "json",
+        }
+        try:
+            if httpx is not None:
+                async with httpx.AsyncClient(timeout=25) as client:
+                    r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
+                    if r.status_code != 200:
+                        return []
+                    data = r.json() or {}
+            else:
+                url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
+                with urllib.request.urlopen(url, timeout=25) as resp:
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+        except Exception:
+            return []
+
+        arts = data.get("articles") or data.get("artList") or data.get("artlist") or data.get("docs") or data.get("documents") or []
+        if isinstance(arts, dict):
+            # некоторые варианты могут вкладывать список иначе
+            arts = arts.get("articles") or arts.get("artList") or []
+        return arts if isinstance(arts, list) else []
 
     seen = set()
     items = []
-    for a in arts:
-        title = (a.get("title") or "").strip()
-        url = (a.get("url") or "").strip()
-        if not title or not url:
-            continue
-        key = (title, url)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append({
-            "title": title,
-            "url": url,
-            "description": (a.get("seendescription") or a.get("excerpt") or "").strip(),
-            "source": (a.get("sourceCountry") or a.get("domain") or "").strip(),
-            "publishedAt": (a.get("seendate") or "").strip(),
-        })
-        if len(items) >= limit:
+    for q in queries:
+        arts = await fetch_once(q)
+        for a in arts:
+            # Нормализуем ключи статей
+            title = (a.get("title") or a.get("Title") or a.get("docTitle") or "").strip()
+            url = (a.get("url") or a.get("URL") or a.get("shareImage") or "").strip()
+            if not title or not url:
+                continue
+            key = (title, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            description = (a.get("seendescription") or a.get("description") or a.get("excerpt") or a.get("snippet") or "").strip()
+            source = (a.get("sourceCountry") or a.get("sourcecountry") or a.get("domain") or a.get("SourceCommonName") or "").strip()
+            published = (a.get("seendate") or a.get("date") or a.get("publishDate") or "").strip()
+            items.append({
+                "title": title,
+                "url": url,
+                "description": description,
+                "source": source,
+                "publishedAt": published,
+            })
+            if len(items) >= limit:
+                break
+        if len(items) >= max(3, limit // 2):  # достаточно нашлось — выходим
             break
-    return items
+    return items[:limit]
 
 def summarize_with_sumy(items, sentences_count=6, language="russian"):
     if not items:
