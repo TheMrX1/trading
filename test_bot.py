@@ -175,7 +175,7 @@ async def show_portfolio_menu(query, user_id):
             lines.append("")
         lines.append(f"инвестировано: {total_invested:.2f} USD")
         pct_change = (total_change / total_invested * 100.0) if total_invested > 0 else 0.0
-        lines.append(f"total: {total_change:+.2f} USD ({pct_change:+.2f}%)")
+        lines.append(f"заработок: {total_change:+.2f} USD ({pct_change:+.2f}%)")
         lines.append("")
     keyboard = [
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
@@ -229,6 +229,8 @@ def estimate_liquidity(df, eps_bp=5):
     
     if price_column not in df:
         return None
+    # Избегаем предупреждения SettingWithCopyWarning при работе с срезами
+    df = df.copy()
         
     df["ret_abs"] = (df[price_column].pct_change().abs()).fillna(0)
     valid = df[(df["Volume"] > 0) & (df["ret_abs"] < 0.1)]
@@ -498,7 +500,7 @@ def build_info_text(ticker, user_id=None):
 
     user_comment = user_comments.get(user_id, {}).get(ticker) if user_id else None
     if user_id and ticker not in user_assets.get(user_id, []):
-        info.append("💬 Комментарий: Вы не добавили актив в Ваши активы")
+        info.append("💬 Комментарий: Вы не добавили этот актив в Ваши активы")
     elif user_comment:
         info.append(f"💬 Комментарий: {user_comment}")
 
@@ -660,11 +662,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         try:
             text = build_info_text(ticker, user_id)
-            await query.edit_message_text(text)
-            await query.message.reply_text("Главное меню:", reply_markup=main_menu())
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
-            await query.edit_message_text(f"Ошибка: {e}")
-            await query.message.reply_text("Главное меню:", reply_markup=main_menu())
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
+            await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("delete_"):
         ticker = query.data.split("_", 1)[1]
@@ -861,7 +863,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 3)[3]
         display_name = get_display_name(ticker, user_id)
         keyboard = [
-            [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
+            [InlineKeyboardButton("ℹ️ Информация", callback_data=f"infoany_{ticker}"),
              InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calcany_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
@@ -880,6 +882,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]
         ]
         await query.edit_message_text(f"🧮 Калькулятор для {display_name}\nВыберите метрику:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("infoany_"):
+        ticker = query.data.split("_", 1)[1]
+        try:
+            text = build_info_text(ticker, user_id)
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
+            await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "back":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
