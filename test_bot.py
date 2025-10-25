@@ -5,6 +5,11 @@ import yfinance as yf
 import numpy as np
 import os
 from dotenv import load_dotenv
+import httpx
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.lex_rank import LexRankSummarizer
+from sumy.utils import get_stop_words
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -96,7 +101,8 @@ def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
-        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio")],
+        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio"),
+         InlineKeyboardButton("📰 Новости", callback_data="news")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
          InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
@@ -859,6 +865,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("Введите тикер для получения информации/калькулятора:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif query.data == "news":
+        sector = get_user_sector(user_id)
+        if not sector:
+            user_states[user_id] = "waiting_for_news_sector"
+            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+            await query.edit_message_text("Укажите сектор для новостей (например: Technology, Energy, Healthcare):",
+                                          reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await show_news_for_sector(query, user_id, sector)
+
     elif query.data.startswith("ticker_info_menu_"):
         ticker = query.data.split("_", 3)[3]
         display_name = get_display_name(ticker, user_id)
@@ -1018,6 +1034,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
         await update.message.reply_text(f"Тикер {display_name}. Выберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif user_states.get(user_id) == "waiting_for_news_sector":
+        sector = update.message.text.strip()
+        user_settings.setdefault(user_id, {})
+        user_settings[user_id]["news_sector"] = sector
+        save_user_data()
+        user_states[user_id] = None
+        await update.message.reply_text(f"Сектор «{sector}» сохранен. Загружаю новости...")
+        class DummyQuery:
+            def __init__(self, chat_id, message_id):
+                self.message = None
+                self.chat_id = chat_id
+                self.message_id = message_id
+            async def edit_message_text(self, text, reply_markup=None):
+                await update.message.reply_text(text, reply_markup=reply_markup)
+        dummy = DummyQuery(update.effective_chat.id, update.message.message_id)
+        await show_news_for_sector(dummy, user_id, sector)
 
     elif user_states.get(user_id) == "waiting_for_asset":
         ticker = update.message.text.strip().upper()
@@ -1311,6 +1344,119 @@ def save_blacklist():
 def get_user_name(user_id):
     """Получает имя пользователя по ID"""
     return USER_NAMES.get(user_id, f"User_{user_id}")
+
+def get_user_sector(user_id):
+    sector = user_settings.get(user_id, {}).get("news_sector")
+    if sector:
+        return sector
+    sectors = {}
+    for t in user_assets.get(user_id, []):
+        try:
+            info = yf.Ticker(t).info or {}
+            s = info.get("sector")
+            if s:
+                sectors[s] = sectors.get(s, 0) + 1
+        except Exception:
+            pass
+    if sectors:
+        return max(sectors.items(), key=lambda kv: kv[1])[0]
+    return None
+
+async def fetch_sector_news_gdelt(sector, limit=12, lang="ru"):
+    # составляем запрос по сектору
+    sector_map = {
+        "Technology": ["technology", "semiconductor", "software", "AI", "cloud"],
+        "Energy": ["energy", "oil", "gas"],
+        "Financial Services": ["finance", "bank", "insurance", "fintech"],
+        "Healthcare": ["healthcare", "biotech", "pharma"],
+        "Communication Services": ["telecom", "media", "communication"],
+        "Consumer Cyclical": ["retail", "auto", "consumer discretionary"],
+        "Industrials": ["industrial", "logistics", "aerospace"],
+        "Utilities": ["utilities", "electric", "water"],
+        "Materials": ["materials", "metals", "chemicals"],
+        "Real Estate": ["real estate", "reit"],
+    }
+    terms = sector_map.get(sector, [])
+    # если сектор произвольный — используем его как ключевое слово
+    query = sector if not terms else f"({sector}) OR (" + " OR ".join(terms) + ")"
+    query += " AND (market OR stocks OR finance)"
+
+    params = {
+        "query": query,
+        "timespan": "2w",
+        "maxrecords": str(min(limit * 3, 75)),
+        "sort": "DateDesc",
+        "format": "json"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
+            if r.status_code != 200:
+                return []
+            data = r.json() or {}
+            arts = data.get("articles") or []
+    except Exception:
+        return []
+
+    seen = set()
+    items = []
+    for a in arts:
+        title = (a.get("title") or "").strip()
+        url = (a.get("url") or "").strip()
+        if not title or not url:
+            continue
+        key = (title, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "title": title,
+            "url": url,
+            "description": (a.get("seendescription") or a.get("excerpt") or "").strip(),
+            "source": (a.get("sourceCountry") or a.get("domain") or "").strip(),
+            "publishedAt": (a.get("seendate") or "").strip(),
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+def summarize_with_sumy(items, sentences_count=6, language="russian"):
+    if not items:
+        return "📰 Свежих новостей не найдено."
+    # Компонуем текст: заголовок + описание + ссылка
+    parts = []
+    for it in items:
+        one = it["title"]
+        if it.get("description"):
+            one += ". " + it["description"]
+        one += f" ({it['url']})"
+        parts.append(one)
+    text = "\n".join(parts)
+
+    try:
+        parser = PlaintextParser.from_string(text, Tokenizer(language))
+        summarizer = LexRankSummarizer()
+        summarizer.stop_words = get_stop_words(language)
+        summary = summarizer(parser.document, sentences_count)
+        lines = [str(s) for s in summary if str(s).strip()]
+        # Если суммаризация получилась пустой, вернем топ-список
+        if not lines:
+            lines = [f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2]]
+            return "\n".join(lines)
+        return "\n".join(f"- {line}" for line in lines)
+    except Exception:
+        # На случай непредвиденной ошибки — простой список
+        return "\n".join(f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2])
+
+async def show_news_for_sector(query, user_id, sector):
+    items = await fetch_sector_news_gdelt(sector, limit=12, lang="ru")
+    if not items:
+        text = f"📰 Новости по сектору «{sector}» за 2 недели не найдены."
+    else:
+        text = f"📰 Новости по сектору «{sector}» (последние 2 недели):\n\n"
+        text += summarize_with_sumy(items, sentences_count=6, language="russian")
+    keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def remove_asset_from_all_users(ticker):
     """Удаляет актив из списков всех пользователей"""
