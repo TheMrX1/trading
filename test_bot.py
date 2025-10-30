@@ -112,6 +112,9 @@ def format_source(url: str) -> str:
 
 
 def fetch_finviz_insights(ticker: str) -> list:
+    """Attempt to extract AI-summarized insight from finviz quote page.
+    Returns at most one main summary plus optional secondary sentences.
+    """
     url = f"https://finviz.com/quote.ashx?t={quote_plus(ticker.upper())}&p=d"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -122,37 +125,63 @@ def fetch_finviz_insights(ticker: str) -> list:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
             return insights
-        html = resp.text
-        soup = BeautifulSoup(html, "html.parser")
-        # Heuristic extraction of prominent banner-like sentences
-        text_nodes = soup.find_all(text=True)
-        for node in text_nodes:
-            txt = (node or "").strip()
-            if not txt or len(txt) < 40:
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Strategy 1: dedicated AI/insight containers (class/id/data-*)
+        candidate_selectors = [
+            '[class*="ai"]', '[class*="insight"]', '[class*="summary"]',
+            '[id*="ai"]', '[id*="insight"]', '[id*="summary"]',
+            '[data-testid*="ai"]', '[data-testid*="insight"]', '[data-test*="insight"]'
+        ]
+        blocks = []
+        for sel in candidate_selectors:
+            try:
+                blocks.extend(soup.select(sel))
+            except Exception:
+                pass
+
+        def clean(txt: str) -> str:
+            return " ".join((txt or "").split())
+
+        best = None
+        for b in blocks:
+            txt = clean(b.get_text(" ", strip=True))
+            if not txt:
                 continue
-            low = txt.lower()
-            if any(k in low for k in [
-                "scheduled to report",
-                "scheduled to release",
-                "earnings",
-                "guidance",
-                "dividend",
-                "raises",
-                "cuts",
-                "outlook",
-                "investors"
-            ]):
-                if len(txt) <= 280 and all(bad not in low for bad in ["privacy", "terms", "advert", "subscribe"]):
-                    insights.append(txt)
-        # Deduplicate preserving order
-        seen = set()
-        unique = []
-        for it in insights:
-            key = it
-            if key not in seen:
-                seen.add(key)
-                unique.append(it)
-        return unique[:3]
+            # Prefer medium-size sentences likely to be AI summary
+            if 60 <= len(txt) <= 320:
+                best = txt
+                break
+
+        # Strategy 2: meta description / OG description as fallback
+        if not best:
+            meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
+            if meta and meta.get("content"):
+                mtxt = clean(meta.get("content"))
+                if 40 <= len(mtxt) <= 260:
+                    best = mtxt
+
+        # Strategy 3: text scan for typical AI headline sentence (Today ... earnings ... etc.)
+        if not best:
+            text_nodes = soup.find_all(string=True)
+            for node in text_nodes:
+                txt = clean(node)
+                if len(txt) < 40 or len(txt) > 300:
+                    continue
+                low = txt.lower()
+                keywords = [
+                    "scheduled to report", "scheduled to release", "earnings",
+                    "after the market", "before the market", "guidance", "outlook",
+                    "dividend", "buyback", "key event for investors"
+                ]
+                noise = ["privacy", "terms", "advert", "subscribe", "log in", "sign in"]
+                if any(k in low for k in keywords) and not any(n in low for n in noise):
+                    best = txt
+                    break
+
+        if best:
+            insights.append(best)
+        return insights[:1]
     except Exception:
         return insights
 
