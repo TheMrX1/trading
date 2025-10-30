@@ -144,62 +144,8 @@ def fetch_finviz_insights(ticker: str) -> list:
                         return insights[:1]
         except Exception:
             pass
-
-        # Strategy 1: dedicated AI/insight containers (class/id/data-*)
-        candidate_selectors = [
-            '[class*="ai"]', '[class*="insight"]', '[class*="summary"]',
-            '[id*="ai"]', '[id*="insight"]', '[id*="summary"]',
-            '[data-testid*="ai"]', '[data-testid*="insight"]', '[data-test*="insight"]'
-        ]
-        blocks = []
-        for sel in candidate_selectors:
-            try:
-                blocks.extend(soup.select(sel))
-            except Exception:
-                pass
-
-        def clean(txt: str) -> str:
-            return " ".join((txt or "").split())
-
-        best = None
-        for b in blocks:
-            txt = clean(b.get_text(" ", strip=True))
-            if not txt:
-                continue
-            # Prefer medium-size sentences likely to be AI summary
-            if 60 <= len(txt) <= 320:
-                best = txt
-                break
-
-        # Strategy 2: meta description / OG description as fallback
-        if not best:
-            meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
-            if meta and meta.get("content"):
-                mtxt = clean(meta.get("content"))
-                if 40 <= len(mtxt) <= 260:
-                    best = mtxt
-
-        # Strategy 3: text scan for typical AI headline sentence (Today ... earnings ... etc.)
-        if not best:
-            text_nodes = soup.find_all(string=True)
-            for node in text_nodes:
-                txt = clean(node)
-                if len(txt) < 40 or len(txt) > 300:
-                    continue
-                low = txt.lower()
-                keywords = [
-                    "scheduled to report", "scheduled to release", "earnings",
-                    "after the market", "before the market", "guidance", "outlook",
-                    "dividend", "buyback", "key event for investors"
-                ]
-                noise = ["privacy", "terms", "advert", "subscribe", "log in", "sign in"]
-                if any(k in low for k in keywords) and not any(n in low for n in noise):
-                    best = txt
-                    break
-
-        if best:
-            insights.append(best)
-        return insights[:1]
+        # If no init JSON found, считаем что инсайтов нет — возвращаем пусто
+        return insights
     except Exception:
         return insights
 
@@ -718,7 +664,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"{get_display_name(t, user_id)}:")
                 for s in insights:
                     lines.append(f"• {s}")
-                lines.append(f"{format_source(f'https://finviz.com/quote.ashx?t={t}&p=d')}")
                 lines.append("")
         if len(lines) <= 2:
             lines.append("Инсайты не найдены.")
