@@ -1,4 +1,5 @@
 import logging
+import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import yfinance as yf
@@ -126,6 +127,23 @@ def fetch_finviz_insights(ticker: str) -> list:
         if resp.status_code != 200:
             return insights
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Primary: FINVIZ embeds an init JSON with id 'why-stock-moving-init-data-<n>'
+        try:
+            init_scripts = soup.find_all("script", id=lambda x: isinstance(x, str) and x.startswith("why-stock-moving-init-data"))
+            for sc in init_scripts:
+                raw = (sc.string or sc.get_text("", strip=True) or "").strip()
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                wm = data.get("whyMoving") if isinstance(data, dict) else None
+                if wm:
+                    headline = wm.get("headline") or wm.get("summary")
+                    if headline:
+                        insights.append(" ".join(str(headline).split()))
+                        return insights[:1]
+        except Exception:
+            pass
 
         # Strategy 1: dedicated AI/insight containers (class/id/data-*)
         candidate_selectors = [
