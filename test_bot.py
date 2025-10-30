@@ -1,27 +1,11 @@
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import asyncio
-from io import BytesIO
-import importlib
 import yfinance as yf
 import numpy as np
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
-
-HAS_MATPLOTLIB = False
-MATPLOTLIB_IMPORT_ERROR = None
-plt = None
-matplotlib = None
-
-try:
-    matplotlib = importlib.import_module("matplotlib")
-    matplotlib.use("Agg")
-    plt = importlib.import_module("matplotlib.pyplot")
-    HAS_MATPLOTLIB = True
-except Exception as exc:  # pragma: no cover - optional dependency
-    MATPLOTLIB_IMPORT_ERROR = exc
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -29,12 +13,12 @@ from telegram.ext import (
 )
 
 load_dotenv()
-BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("TEST_BOT_TOKEN not found in .env file")
+    raise ValueError("BOT_TOKEN not found in .env file")
 
-TRUSTED_USERS = [1085064193, 7424028554]
-#TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336, 5405897708]
+#TRUSTED_USERS = [1085064193, 7424028554]
+TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336, 5405897708]
 
 USER_NAMES = {
     1085064193: "Дима О",
@@ -108,6 +92,12 @@ def get_display_name(ticker, user_id=None):
     if company_name and company_name != ticker:
         return f"{company_name} ({ticker})"
     return ticker
+
+
+def get_finviz_chart_url(ticker: str) -> str:
+    encoded_ticker = quote_plus(ticker.upper())
+    return f"https://finviz.com/chart.ashx?t={encoded_ticker}&ty=c&ta=1&p=d&s=l"
+
 
 def main_menu():
     keyboard = [
@@ -523,107 +513,6 @@ def build_info_text(ticker, user_id=None):
 
     return "\n\n".join(info)
 
-def create_info_card_image(ticker, user_id=None):
-    if not HAS_MATPLOTLIB or plt is None:
-        raise ImportError("matplotlib is not available")
-
-    stock = yf.Ticker(ticker)
-    hist = stock.history(period="10d", interval="1h")
-    price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
-    closes = hist[price_column].dropna()
-
-    if closes.empty:
-        hist = stock.history(period="1mo", interval="1d")
-        price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
-        closes = hist[price_column].dropna()
-
-    if closes.empty:
-        raise ValueError("Недостаточно данных для построения карточки")
-
-    closes = closes.tail(150)
-    x_axis = np.linspace(0, 1, len(closes))
-    start_price = float(closes.iloc[0])
-    end_price = float(closes.iloc[-1])
-    diff = end_price - start_price
-    diff_pct = (diff / start_price * 100) if start_price else 0.0
-    change_color = "#34c759" if diff >= 0 else "#ff453a"
-
-    try:
-        info = stock.info
-    except Exception:
-        info = {}
-    currency = info.get("currency") or "USD"
-
-    display_title = get_display_name(ticker, user_id) or ticker.upper()
-
-    last_idx = closes.index[-1]
-    if hasattr(last_idx, "to_pydatetime"):
-        last_dt = last_idx.to_pydatetime()
-    elif isinstance(last_idx, datetime):
-        last_dt = last_idx
-    else:
-        last_dt = datetime.now(timezone.utc)
-    if last_dt.tzinfo is None:
-        last_dt = last_dt.replace(tzinfo=timezone.utc)
-    msk_dt = last_dt.astimezone(ZoneInfo("Europe/Moscow"))
-    time_text = msk_dt.strftime("%Y-%m-%d %H:%M MSK")
-
-    start_idx = closes.index[0]
-    if hasattr(start_idx, "strftime"):
-        start_label = start_idx.strftime("%b %d")
-    else:
-        start_label = ""
-    end_label = msk_dt.strftime("%b %d")
-
-    baseline = float(closes.min())
-    fig, ax = plt.subplots(figsize=(6.4, 3.6), dpi=200)
-    background_color = "#0f4c81"
-    accent_color = "#fbc531"
-    fig.patch.set_facecolor(background_color)
-    ax.set_facecolor(background_color)
-    ax.plot(x_axis, closes.values, color=accent_color, linewidth=3)
-    ax.fill_between(x_axis, closes.values, baseline, color=accent_color, alpha=0.22)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    fig.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.25)
-
-    fig.text(0.05, 0.92, display_title, fontsize=20, fontweight="bold", color="#ffffff")
-    fig.text(0.95, 0.92, ticker.upper(), fontsize=12, ha="right", color="#d1d5db")
-    fig.text(0.05, 0.74, f"{end_price:.2f} {currency}", fontsize=32, fontweight="bold", color="#ffffff")
-    arrow = "▲" if diff >= 0 else "▼"
-    fig.text(0.05, 0.6, f"{arrow} {diff_pct:+.2f}% ({diff:+.2f})", fontsize=16, color=change_color)
-    fig.text(0.05, 0.45, f"Старт: {start_price:.2f} {currency}", fontsize=11, color="#d1d5db")
-    if start_label:
-        fig.text(0.95, 0.24, f"{start_label} — {end_label}", fontsize=11, ha="right", color="#d1d5db")
-    fig.text(0.95, 0.12, time_text, fontsize=10, ha="right", color="#d1d5db")
-
-    buffer = BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buffer.seek(0)
-
-    caption = f"{display_title}: {end_price:.2f} {currency} ({diff_pct:+.2f}%)"
-    return buffer, caption
-
-async def send_info_card_for_query(query, ticker, user_id=None):
-    if not HAS_MATPLOTLIB or plt is None:
-        if MATPLOTLIB_IMPORT_ERROR:
-            logger.debug("Карточки недоступны: %s", MATPLOTLIB_IMPORT_ERROR)
-        return
-
-    try:
-        buffer, caption = await asyncio.to_thread(create_info_card_image, ticker, user_id)
-    except Exception as exc:
-        logger.debug("Не удалось построить карточку для %s: %s", ticker, exc)
-        return
-
-    try:
-        await query.message.reply_photo(photo=buffer, caption=caption)
-    except Exception as exc:
-        logger.debug("Не удалось отправить карточку для %s: %s", ticker, exc)
-
 def build_sector_text(ticker, user_id=None):
     ticker = ticker.upper()
     stock = yf.Ticker(ticker)
@@ -774,15 +663,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➕ Купить", callback_data=f"buy_{ticker}"), InlineKeyboardButton("➖ Продать", callback_data=f"sell_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
-        await query.edit_message_text(f"Актив {display_name}\nКомментарий: {comment}", reply_markup=InlineKeyboardMarkup(keyboard))
+        text = f"Актив {display_name}\nКомментарий: {comment}"
+        markup = InlineKeyboardMarkup(keyboard)
+        message = query.message
+        chat_id = message.chat_id if message else query.from_user.id
+        if message and message.photo:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        elif message:
+            await query.edit_message_text(text, reply_markup=markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
-        await send_info_card_for_query(query, ticker, user_id)
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            photo_url = get_finviz_chart_url(ticker)
+            message = query.message
+            chat_id = message.chat_id if message else query.from_user.id
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_url,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            try:
+                if message:
+                    await message.delete()
+            except Exception:
+                pass
+            return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
             await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -986,7 +901,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calcany_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
-        await query.edit_message_text(f"Тикер {display_name}. Выберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
+        text = f"Тикер {display_name}. Выберите действие:"
+        markup = InlineKeyboardMarkup(keyboard)
+        message = query.message
+        chat_id = message.chat_id if message else query.from_user.id
+        if message and message.photo:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        elif message:
+            await query.edit_message_text(text, reply_markup=markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
     elif query.data.startswith("calcany_"):
         ticker = query.data.split("_", 1)[1]
@@ -1004,11 +932,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("infoany_"):
         ticker = query.data.split("_", 1)[1]
-        await send_info_card_for_query(query, ticker, user_id)
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            photo_url = get_finviz_chart_url(ticker)
+            message = query.message
+            chat_id = message.chat_id if message else query.from_user.id
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_url,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            try:
+                if message:
+                    await message.delete()
+            except Exception:
+                pass
+            return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
             await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
