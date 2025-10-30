@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 import numpy as np
 import os
+import time
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -91,6 +93,14 @@ def get_display_name(ticker, user_id=None):
     if company_name and company_name != ticker:
         return f"{company_name} ({ticker})"
     return ticker
+
+
+def get_finviz_chart_url(ticker: str, period: str = "i") -> str:
+    encoded_ticker = quote_plus(ticker.upper())
+    cache_bust = int(time.time())
+    # period: i = intraday, d = daily. Add cache-busting param to avoid Telegram CDN caching
+    return f"https://finviz.com/chart.ashx?t={encoded_ticker}&ty=c&ta=1&p={period}&s=l&_={cache_bust}"
+
 
 def main_menu():
     keyboard = [
@@ -656,14 +666,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➕ Купить", callback_data=f"buy_{ticker}"), InlineKeyboardButton("➖ Продать", callback_data=f"sell_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="my_assets")]
         ]
-        await query.edit_message_text(f"Актив {display_name}\nКомментарий: {comment}", reply_markup=InlineKeyboardMarkup(keyboard))
+        text = f"Актив {display_name}\nКомментарий: {comment}"
+        markup = InlineKeyboardMarkup(keyboard)
+        message = query.message
+        chat_id = message.chat_id if message else query.from_user.id
+        if message and message.photo:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        elif message:
+            await query.edit_message_text(text, reply_markup=markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            photo_url = get_finviz_chart_url(ticker)
+            message = query.message
+            chat_id = message.chat_id if message else query.from_user.id
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_url,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            try:
+                if message:
+                    await message.delete()
+            except Exception:
+                pass
+            return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
             await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -867,7 +904,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🧮 Калькулятор", callback_data=f"calcany_{ticker}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
-        await query.edit_message_text(f"Тикер {display_name}. Выберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
+        text = f"Тикер {display_name}. Выберите действие:"
+        markup = InlineKeyboardMarkup(keyboard)
+        message = query.message
+        chat_id = message.chat_id if message else query.from_user.id
+        if message and message.photo:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        elif message:
+            await query.edit_message_text(text, reply_markup=markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
     elif query.data.startswith("calcany_"):
         ticker = query.data.split("_", 1)[1]
@@ -888,7 +938,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            photo_url = get_finviz_chart_url(ticker)
+            message = query.message
+            chat_id = message.chat_id if message else query.from_user.id
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_url,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            try:
+                if message:
+                    await message.delete()
+            except Exception:
+                pass
+            return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
             await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1549,7 +1613,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
