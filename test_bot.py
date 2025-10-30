@@ -1,34 +1,26 @@
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import asyncio
+from io import BytesIO
+import importlib
 import yfinance as yf
 import numpy as np
 import os
 from dotenv import load_dotenv
 
-# Optional deps guarded: httpx and sumy
-try:
-    import httpx  # type: ignore
-except Exception:  # ImportError or others
-    httpx = None  # type: ignore
+HAS_MATPLOTLIB = False
+MATPLOTLIB_IMPORT_ERROR = None
+plt = None
+matplotlib = None
 
 try:
-    from sumy.parsers.plaintext import PlaintextParser  # type: ignore
-    from sumy.nlp.tokenizers import Tokenizer  # type: ignore
-    from sumy.summarizers.lex_rank import LexRankSummarizer  # type: ignore
-    from sumy.utils import get_stop_words  # type: ignore
-    _SUMY_AVAILABLE = True
-except Exception:
-    PlaintextParser = None  # type: ignore
-    Tokenizer = None  # type: ignore
-    LexRankSummarizer = None  # type: ignore
-    get_stop_words = None  # type: ignore
-    _SUMY_AVAILABLE = False
-
-# Fallback stdlib for HTTP if httpx is absent
-import urllib.request
-import urllib.parse
-import json
+    matplotlib = importlib.import_module("matplotlib")
+    matplotlib.use("Agg")
+    plt = importlib.import_module("matplotlib.pyplot")
+    HAS_MATPLOTLIB = True
+except Exception as exc:  # pragma: no cover - optional dependency
+    MATPLOTLIB_IMPORT_ERROR = exc
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -121,8 +113,7 @@ def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
-        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio"),
-         InlineKeyboardButton("📰 Новости", callback_data="news")],
+        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
          InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
@@ -532,6 +523,107 @@ def build_info_text(ticker, user_id=None):
 
     return "\n\n".join(info)
 
+def create_info_card_image(ticker, user_id=None):
+    if not HAS_MATPLOTLIB or plt is None:
+        raise ImportError("matplotlib is not available")
+
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period="10d", interval="1h")
+    price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+    closes = hist[price_column].dropna()
+
+    if closes.empty:
+        hist = stock.history(period="1mo", interval="1d")
+        price_column = "Adj Close" if "Adj Close" in hist.columns else "Close"
+        closes = hist[price_column].dropna()
+
+    if closes.empty:
+        raise ValueError("Недостаточно данных для построения карточки")
+
+    closes = closes.tail(150)
+    x_axis = np.linspace(0, 1, len(closes))
+    start_price = float(closes.iloc[0])
+    end_price = float(closes.iloc[-1])
+    diff = end_price - start_price
+    diff_pct = (diff / start_price * 100) if start_price else 0.0
+    change_color = "#34c759" if diff >= 0 else "#ff453a"
+
+    try:
+        info = stock.info
+    except Exception:
+        info = {}
+    currency = info.get("currency") or "USD"
+
+    display_title = get_display_name(ticker, user_id) or ticker.upper()
+
+    last_idx = closes.index[-1]
+    if hasattr(last_idx, "to_pydatetime"):
+        last_dt = last_idx.to_pydatetime()
+    elif isinstance(last_idx, datetime):
+        last_dt = last_idx
+    else:
+        last_dt = datetime.now(timezone.utc)
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    msk_dt = last_dt.astimezone(ZoneInfo("Europe/Moscow"))
+    time_text = msk_dt.strftime("%Y-%m-%d %H:%M MSK")
+
+    start_idx = closes.index[0]
+    if hasattr(start_idx, "strftime"):
+        start_label = start_idx.strftime("%b %d")
+    else:
+        start_label = ""
+    end_label = msk_dt.strftime("%b %d")
+
+    baseline = float(closes.min())
+    fig, ax = plt.subplots(figsize=(6.4, 3.6), dpi=200)
+    background_color = "#0f4c81"
+    accent_color = "#fbc531"
+    fig.patch.set_facecolor(background_color)
+    ax.set_facecolor(background_color)
+    ax.plot(x_axis, closes.values, color=accent_color, linewidth=3)
+    ax.fill_between(x_axis, closes.values, baseline, color=accent_color, alpha=0.22)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.25)
+
+    fig.text(0.05, 0.92, display_title, fontsize=20, fontweight="bold", color="#ffffff")
+    fig.text(0.95, 0.92, ticker.upper(), fontsize=12, ha="right", color="#d1d5db")
+    fig.text(0.05, 0.74, f"{end_price:.2f} {currency}", fontsize=32, fontweight="bold", color="#ffffff")
+    arrow = "▲" if diff >= 0 else "▼"
+    fig.text(0.05, 0.6, f"{arrow} {diff_pct:+.2f}% ({diff:+.2f})", fontsize=16, color=change_color)
+    fig.text(0.05, 0.45, f"Старт: {start_price:.2f} {currency}", fontsize=11, color="#d1d5db")
+    if start_label:
+        fig.text(0.95, 0.24, f"{start_label} — {end_label}", fontsize=11, ha="right", color="#d1d5db")
+    fig.text(0.95, 0.12, time_text, fontsize=10, ha="right", color="#d1d5db")
+
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buffer.seek(0)
+
+    caption = f"{display_title}: {end_price:.2f} {currency} ({diff_pct:+.2f}%)"
+    return buffer, caption
+
+async def send_info_card_for_query(query, ticker, user_id=None):
+    if not HAS_MATPLOTLIB or plt is None:
+        if MATPLOTLIB_IMPORT_ERROR:
+            logger.debug("Карточки недоступны: %s", MATPLOTLIB_IMPORT_ERROR)
+        return
+
+    try:
+        buffer, caption = await asyncio.to_thread(create_info_card_image, ticker, user_id)
+    except Exception as exc:
+        logger.debug("Не удалось построить карточку для %s: %s", ticker, exc)
+        return
+
+    try:
+        await query.message.reply_photo(photo=buffer, caption=caption)
+    except Exception as exc:
+        logger.debug("Не удалось отправить карточку для %s: %s", ticker, exc)
+
 def build_sector_text(ticker, user_id=None):
     ticker = ticker.upper()
     stock = yf.Ticker(ticker)
@@ -686,6 +778,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("info_"):
         ticker = query.data.split("_", 1)[1]
+        await send_info_card_for_query(query, ticker, user_id)
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
@@ -885,16 +978,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("Введите тикер для получения информации/калькулятора:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data == "news":
-        sector = get_user_sector(user_id)
-        if not sector:
-            user_states[user_id] = "waiting_for_news_sector"
-            keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-            await query.edit_message_text("Укажите сектор для новостей (например: Technology, Energy, Healthcare):",
-                                          reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await show_news_for_sector(query, user_id, sector)
-
     elif query.data.startswith("ticker_info_menu_"):
         ticker = query.data.split("_", 3)[3]
         display_name = get_display_name(ticker, user_id)
@@ -921,6 +1004,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("infoany_"):
         ticker = query.data.split("_", 1)[1]
+        await send_info_card_for_query(query, ticker, user_id)
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
@@ -1054,23 +1138,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
         ]
         await update.message.reply_text(f"Тикер {display_name}. Выберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif user_states.get(user_id) == "waiting_for_news_sector":
-        sector = update.message.text.strip()
-        user_settings.setdefault(user_id, {})
-        user_settings[user_id]["news_sector"] = sector
-        save_user_data()
-        user_states[user_id] = None
-        await update.message.reply_text(f"Сектор «{sector}» сохранен. Загружаю новости...")
-        class DummyQuery:
-            def __init__(self, chat_id, message_id):
-                self.message = None
-                self.chat_id = chat_id
-                self.message_id = message_id
-            async def edit_message_text(self, text, reply_markup=None):
-                await update.message.reply_text(text, reply_markup=reply_markup)
-        dummy = DummyQuery(update.effective_chat.id, update.message.message_id)
-        await show_news_for_sector(dummy, user_id, sector)
 
     elif user_states.get(user_id) == "waiting_for_asset":
         ticker = update.message.text.strip().upper()
@@ -1306,17 +1373,13 @@ def save_user_data():
                 f.write("END_PORTFOLIO\n")
 
                 f.write("SETTINGS:\n")
-                # сохраняем настройки пользователя, включая news_sector при наличии
-                settings = user_settings.get(user_id, {}) or {}
-                # дефолты
-                defaults = {
+                settings = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
                     "analysis_days": 5,
                     "cycle_tf": "5m"
                 }
-                merged = {**defaults, **settings}
-                for key, value in merged.items():
+                for key, value in settings.items():
                     f.write(f"{key}={value}\n")
                 f.write("END_SETTINGS\n")
                 f.write("\n")
@@ -1368,148 +1431,6 @@ def save_blacklist():
 def get_user_name(user_id):
     """Получает имя пользователя по ID"""
     return USER_NAMES.get(user_id, f"User_{user_id}")
-
-def get_user_sector(user_id):
-    sector = user_settings.get(user_id, {}).get("news_sector")
-    if sector:
-        return sector
-    sectors = {}
-    for t in user_assets.get(user_id, []):
-        try:
-            info = yf.Ticker(t).info or {}
-            s = info.get("sector")
-            if s:
-                sectors[s] = sectors.get(s, 0) + 1
-        except Exception:
-            pass
-    if sectors:
-        return max(sectors.items(), key=lambda kv: kv[1])[0]
-    return None
-
-async def fetch_sector_news_gdelt(sector, limit=12, lang="ru"):
-    # составляем расширенные запросы (EN+RU синонимы) и пробуем по очереди
-    sector_map = {
-        "Technology": ["technology", "tech", "semiconductor", "software", "AI", "cloud"],
-        "Energy": ["energy", "oil", "gas"],
-        "Financial Services": ["finance", "bank", "insurance", "fintech"],
-        "Healthcare": ["healthcare", "biotech", "pharma"],
-        "Communication Services": ["telecom", "media", "communication"],
-        "Consumer Cyclical": ["retail", "auto", "consumer discretionary"],
-        "Industrials": ["industrial", "logistics", "aerospace"],
-        "Utilities": ["utilities", "electric", "water"],
-        "Materials": ["materials", "metals", "chemicals"],
-        "Real Estate": ["real estate", "reit"],
-    }
-    base_terms = sector_map.get(sector, []) + ([sector] if sector else [])
-    news_terms_en = ["market", "stocks", "finance", "earnings", "ipo", "investment", "economy", "report"]
-    news_terms_ru = ["рынок", "акции", "биржа", "финансы", "отчет", "отчёт", "прибыль", "убыток", "экономика", "новости"]
-
-    queries = []
-    if base_terms:
-        queries.append(f"((" + " OR ".join(base_terms) + ")) AND ((" + " OR ".join(news_terms_en + news_terms_ru) + "))")
-        queries.append("(" + " OR ".join(base_terms) + ")")
-    if sector and sector not in base_terms:
-        queries.append(sector)
-
-    async def fetch_once(q: str):
-        params = {
-            "query": q,
-            "timespan": "2w",
-            "maxrecords": "100",
-            "sort": "DateDesc",
-            "mode": "ArtList",
-            "format": "json",
-        }
-        try:
-            if httpx is not None:
-                async with httpx.AsyncClient(timeout=25) as client:
-                    r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
-                    if r.status_code != 200:
-                        return []
-                    data = r.json() or {}
-            else:
-                url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode(params)
-                with urllib.request.urlopen(url, timeout=25) as resp:
-                    raw = resp.read().decode("utf-8")
-                data = json.loads(raw)
-        except Exception:
-            return []
-
-        arts = data.get("articles") or data.get("artList") or data.get("artlist") or data.get("docs") or data.get("documents") or []
-        if isinstance(arts, dict):
-            # некоторые варианты могут вкладывать список иначе
-            arts = arts.get("articles") or arts.get("artList") or []
-        return arts if isinstance(arts, list) else []
-
-    seen = set()
-    items = []
-    for q in queries:
-        arts = await fetch_once(q)
-        for a in arts:
-            # Нормализуем ключи статей
-            title = (a.get("title") or a.get("Title") or a.get("docTitle") or "").strip()
-            url = (a.get("url") or a.get("URL") or a.get("shareImage") or "").strip()
-            if not title or not url:
-                continue
-            key = (title, url)
-            if key in seen:
-                continue
-            seen.add(key)
-            description = (a.get("seendescription") or a.get("description") or a.get("excerpt") or a.get("snippet") or "").strip()
-            source = (a.get("sourceCountry") or a.get("sourcecountry") or a.get("domain") or a.get("SourceCommonName") or "").strip()
-            published = (a.get("seendate") or a.get("date") or a.get("publishDate") or "").strip()
-            items.append({
-                "title": title,
-                "url": url,
-                "description": description,
-                "source": source,
-                "publishedAt": published,
-            })
-            if len(items) >= limit:
-                break
-        if len(items) >= max(3, limit // 2):  # достаточно нашлось — выходим
-            break
-    return items[:limit]
-
-def summarize_with_sumy(items, sentences_count=6, language="russian"):
-    if not items:
-        return "📰 Свежих новостей не найдено."
-    # Компонуем текст: заголовок + описание + ссылка
-    parts = []
-    for it in items:
-        one = it["title"]
-        if it.get("description"):
-            one += ". " + it["description"]
-        one += f" ({it['url']})"
-        parts.append(one)
-    text = "\n".join(parts)
-
-    try:
-        if _SUMY_AVAILABLE:
-            parser = PlaintextParser.from_string(text, Tokenizer(language))
-            summarizer = LexRankSummarizer()
-            summarizer.stop_words = get_stop_words(language)
-            summary = summarizer(parser.document, sentences_count)
-            lines = [str(s) for s in summary if str(s).strip()]
-            if not lines:
-                lines = [f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2]]
-                return "\n".join(lines)
-            return "\n".join(f"- {line}" for line in lines)
-        else:
-            # Если sumy недоступен — простой список
-            return "\n".join(f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2])
-    except Exception:
-        return "\n".join(f"- {it['title']} — {it['url']}" for it in items[:sentences_count+2])
-
-async def show_news_for_sector(query, user_id, sector):
-    items = await fetch_sector_news_gdelt(sector, limit=12, lang="ru")
-    if not items:
-        text = f"📰 Новости по сектору «{sector}» за 2 недели не найдены."
-    else:
-        text = f"📰 Новости по сектору «{sector}» (последние 2 недели):\n\n"
-        text += summarize_with_sumy(items, sentences_count=6, language="russian")
-    keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def remove_asset_from_all_users(ticker):
     """Удаляет актив из списков всех пользователей"""
