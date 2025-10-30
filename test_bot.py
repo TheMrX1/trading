@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 import numpy as np
 import os
+import time
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -94,9 +95,11 @@ def get_display_name(ticker, user_id=None):
     return ticker
 
 
-def get_finviz_chart_url(ticker: str) -> str:
+def get_finviz_chart_url(ticker: str, period: str = "i") -> str:
     encoded_ticker = quote_plus(ticker.upper())
-    return f"https://finviz.com/chart.ashx?t={encoded_ticker}&ty=c&ta=1&p=d&s=l"
+    cache_bust = int(time.time())
+    # period: i = intraday, d = daily. Add cache-busting param to avoid Telegram CDN caching
+    return f"https://finviz.com/chart.ashx?t={encoded_ticker}&ty=c&ta=1&p={period}&s=l&_={cache_bust}"
 
 
 def main_menu():
