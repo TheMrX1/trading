@@ -6,6 +6,8 @@ import numpy as np
 import os
 import time
 from urllib.parse import quote_plus
+from html import escape
+from telegram.constants import ParseMode
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -100,6 +102,11 @@ def get_finviz_chart_url(ticker: str, period: str = "i") -> str:
     cache_bust = int(time.time())
     # period: i = intraday, d = daily. Add cache-busting param to avoid Telegram CDN caching
     return f"https://finviz.com/chart.ashx?t={encoded_ticker}&ty=c&ta=1&p={period}&s=l&_={cache_bust}"
+
+
+def format_source(url: str) -> str:
+    safe_url = escape(url, quote=True)
+    return f"<b><i><a href=\"{safe_url}\">источник</a></i></b>"
 
 
 def main_menu():
@@ -459,17 +466,17 @@ def build_info_text(ticker, user_id=None):
         recommendation_parts.append(f"аналитиков: {num_analysts}")
     if recommendation_parts:
         recommendation_line = "; ".join(recommendation_parts)
-        info.append(f"📈 Оценка аналитиков: {recommendation_line}\nИсточник: {rec_source}")
+        info.append(f"📈 Оценка аналитиков: {recommendation_line}\n{format_source(rec_source)}")
     elif rec_source:
-        info.append(f"📈 Оценка аналитиков: данные недоступны\nИсточник: {rec_source}")
+        info.append(f"📈 Оценка аналитиков: данные недоступны\n{format_source(rec_source)}")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {volume}")
     
     cycle_periods = [
-        (5, "5 дней", "5m"),
-        (30, "1 месяц", "1d"),
-        (90, "3 месяца", "1d"),
-        (180, "6 месяцев", "1d"),
-        (365, "1 год", "1d")
+        (5, "5d", "5m"),
+        (30, "1mo", "1d"),
+        (90, "3mo", "1d"),
+        (180, "6mo", "1d"),
+        (365, "1y", "1d")
     ]
     
     cycle_lines = ["🧭 Стадия цикла:"]
@@ -488,9 +495,9 @@ def build_info_text(ticker, user_id=None):
         
         if not period_df.empty:
             period_stage = classify_cycle(period_df)
-            cycle_lines.append(f"{label} ({days}d/{interval}): {period_stage}")
+            cycle_lines.append(f"{label}: {period_stage}")
         else:
-            cycle_lines.append(f"{label} ({days}d/{interval}): данные недоступны")
+            cycle_lines.append(f"{label}: данные недоступны")
     
     cycle_info = "\n".join(cycle_lines)
     chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
@@ -546,13 +553,13 @@ def build_sector_text(ticker, user_id=None):
                     lines.append(f"- {k}: {pct:.1f}%")
                 except Exception:
                     lines.append(f"- {k}: {v}")
-        lines.append(f"Источник: https://finance.yahoo.com/quote/{ticker}/holdings")
+        lines.append(format_source(f"https://finance.yahoo.com/quote/{ticker}/holdings"))
     else:
         if sector:
             lines.append(f"Сектор: {sector}")
         if industry:
             lines.append(f"Отрасль: {industry}")
-        lines.append(f"Источник: https://finance.yahoo.com/quote/{ticker}/profile")
+        lines.append(format_source(f"https://finance.yahoo.com/quote/{ticker}/profile"))
 
     return "\n".join(lines)
 
@@ -580,9 +587,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not assets:
             await query.edit_message_text("У вас пока нет активов.", reply_markup=main_menu())
             return
+        user_trade_context.pop(user_id, None)
         await show_assets_menu(query, user_id, page=0)
 
     elif query.data == "my_portfolio":
+        user_trade_context.pop(user_id, None)
         await show_portfolio_menu(query, user_id)
 
     elif query.data == "group_assets":
@@ -620,6 +629,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 comment = comments.get(asset, "")
                 comment_part = f": {comment}" if comment else ""
                 lines.append(f"{company_name} ({asset}){comment_part}\n")
+
+            # Добавляем сводку по портфелю выбранного пользователя
+            positions = user_portfolio.get(target_user_id, {})
+            if positions:
+                total_change = 0.0
+                total_invested = 0.0
+                for tkr, pos in positions.items():
+                    qty = pos.get("qty", 0)
+                    avg_price = pos.get("avg_price", 0.0)
+                    current = None
+                    try:
+                        fi = getattr(yf.Ticker(tkr), "fast_info", {}) or {}
+                        current = fi.get("last_price")
+                    except Exception:
+                        current = None
+                    if current is None:
+                        try:
+                            hist = yf.Ticker(tkr).history(period="5d")
+                            if not hist.empty:
+                                pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                                current = float(hist[pc].iloc[-1])
+                        except Exception:
+                            current = None
+                    change_value = (current - avg_price) * qty if (current is not None) else 0.0
+                    total_change += change_value
+                    total_invested += (avg_price * qty)
+                lines.append("")
+                lines.append(f"инвестировано: {total_invested:.2f} USD")
+                pct_change = (total_change / total_invested * 100.0) if total_invested > 0 else 0.0
+                lines.append(f"заработок: {total_change:+.2f} USD ({pct_change:+.2f}%)")
+
             text = "\n".join(lines)
 
         keyboard = [
@@ -659,6 +699,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticker = query.data.split("_", 1)[1]
         comment = user_comments.get(user_id, {}).get(ticker, ticker)
         display_name = get_display_name(ticker, user_id)
+        user_trade_context.pop(user_id, None)
         keyboard = [
             [InlineKeyboardButton("ℹ️ Информация", callback_data=f"info_{ticker}"),
              InlineKeyboardButton("🗑 Удалить актив", callback_data=f"delete_{ticker}")],
@@ -693,6 +734,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 photo=photo_url,
                 caption=text,
+                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             try:
@@ -747,10 +789,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text = f"📈 CAGR для {display_name}:\n\n"
             message_text += f"5-летний: {cagr_5y_value:.2f}%\n"
             message_text += f"3-летний: {cagr_3y_value:.2f}%\n\n"
-            message_text += f"Источник данных: {source_url}\n"
+            message_text += f"{format_source(source_url)}\n"
             message_text += f"Формула: CAGR = (Конечная стоимость / Начальная стоимость)^(1/n) - 1"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -760,9 +802,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display_name = get_display_name(ticker, user_id)
         try:
             eps_value, source_url = calculate_eps(ticker)
-            message_text = f"📊 EPS для {display_name}: ${eps_value:.2f}\n\nИсточник данных: {source_url}"
+            message_text = f"📊 EPS для {display_name}: ${eps_value:.2f}\n\n{format_source(source_url)}"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете EPS для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -776,10 +818,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text = f"📊 Бета-коэффициент для {display_name}:\n\n"
             message_text += f"5-летний (месячные данные): {beta_5y_value:.2f}\n"
             message_text += f"3-летний (дневные данные): {beta_3y_value:.2f}\n\n"
-            message_text += f"Источник данных: {source_url}\n"
+            message_text += f"{format_source(source_url)}\n"
             message_text += f"Формула: β = Cov(Ri, Rm) / Var(Rm)"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -789,9 +831,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display_name = get_display_name(ticker, user_id)
         try:
             pe_value, source_url = calculate_pe_ratio(ticker)
-            message_text = f"📊 P/E Ratio для {display_name}: {pe_value:.2f}\n\nИсточник данных: {source_url}"
+            message_text = f"📊 P/E Ratio для {display_name}: {pe_value:.2f}\n\n{format_source(source_url)}"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при получении P/E Ratio для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -811,9 +853,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text = f"📊 RVOL для {display_name}: {rvol:.2f}\n\n"
             message_text += f"Объём (последняя свеча 30d/1d): {int(last['Volume'])}\n"
             message_text += f"Средний объём: {int(avg_vol)}\n\n"
-            message_text += f"Источник данных: https://finance.yahoo.com/quote/{ticker}/key-statistics"
+            message_text += f"{format_source(f'https://finance.yahoo.com/quote/{ticker}/key-statistics')}"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -836,9 +878,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current_price:
                 diff = ((target_value - current_price) / current_price) * 100
                 diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к таргету)"
-            message_text = f"🎯 Консенсусная 12-месячная цель для {display_name}: {target_value:.2f} USD\nИсточник: {source_url}{diff_text}"
+            message_text = f"🎯 Консенсусная 12-месячная цель для {display_name}: {target_value:.2f} USD\n{format_source(source_url)}{diff_text}"
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
             back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при получении цели для {ticker}: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
@@ -894,6 +936,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "ticker_info":
         user_states[user_id] = "waiting_for_ticker_info"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        user_trade_context.pop(user_id, None)
         await query.edit_message_text("Введите тикер для получения информации/калькулятора:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("ticker_info_menu_"):
@@ -945,6 +988,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 photo=photo_url,
                 caption=text,
+                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             try:
@@ -958,6 +1002,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Ошибка: {e}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "back":
+        user_states[user_id] = None
+        user_trade_context.pop(user_id, None)
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
 
     elif query.data.startswith("page_"):
@@ -1069,7 +1115,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             text = f"❌ Не удалось получить сектор для {ticker}: {e}"
         user_states[user_id] = None
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
         await update.message.reply_text("Главное меню:", reply_markup=main_menu())
 
     elif user_states.get(user_id) == "waiting_for_ticker_info":
