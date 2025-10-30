@@ -496,21 +496,10 @@ def build_info_text(ticker, user_id=None):
     info.append(f"🕒 Последнее обновление (MSK): {ts_msk.strftime('%Y-%m-%d %H:%M')}")
     info.append(f"💵 Цена: {price} USD")
     recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
-    recommendation_parts = []
     if recommendation_key:
-        recommendation_parts.append(f"рейтинг: {recommendation_key}")
-    if recommendation_mean:
-        try:
-            recommendation_parts.append(f"mean: {float(recommendation_mean):.2f}")
-        except Exception:
-            pass
-    if num_analysts:
-        recommendation_parts.append(f"аналитиков: {num_analysts}")
-    if recommendation_parts:
-        recommendation_line = "; ".join(recommendation_parts)
-        info.append(f"📈 рейтинг: {recommendation_line}\n{format_source(rec_source)}")
+        info.append(f"совет: {recommendation_key}")
     elif rec_source:
-        info.append(f"📈 рейтинг: данные недоступны\n{format_source(rec_source)}")
+        info.append("совет: данные недоступны")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {volume}")
     
     cycle_periods = [
