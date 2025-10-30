@@ -8,6 +8,8 @@ import time
 from urllib.parse import quote_plus
 from html import escape
 from telegram.constants import ParseMode
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -109,10 +111,57 @@ def format_source(url: str) -> str:
     return f"<b><i><a href=\"{safe_url}\">источник</a></i></b>"
 
 
+def fetch_finviz_insights(ticker: str) -> list:
+    url = f"https://finviz.com/quote.ashx?t={quote_plus(ticker.upper())}&p=d"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"
+    }
+    insights: list[str] = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return insights
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
+        # Heuristic extraction of prominent banner-like sentences
+        text_nodes = soup.find_all(text=True)
+        for node in text_nodes:
+            txt = (node or "").strip()
+            if not txt or len(txt) < 40:
+                continue
+            low = txt.lower()
+            if any(k in low for k in [
+                "scheduled to report",
+                "scheduled to release",
+                "earnings",
+                "guidance",
+                "dividend",
+                "raises",
+                "cuts",
+                "outlook",
+                "investors"
+            ]):
+                if len(txt) <= 280 and all(bad not in low for bad in ["privacy", "terms", "advert", "subscribe"]):
+                    insights.append(txt)
+        # Deduplicate preserving order
+        seen = set()
+        unique = []
+        for it in insights:
+            key = it
+            if key not in seen:
+                seen.add(key)
+                unique.append(it)
+        return unique[:3]
+    except Exception:
+        return insights
+
+
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
+        [InlineKeyboardButton("💡 Инсайты", callback_data="insights")],
         [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
          InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
@@ -466,9 +515,9 @@ def build_info_text(ticker, user_id=None):
         recommendation_parts.append(f"аналитиков: {num_analysts}")
     if recommendation_parts:
         recommendation_line = "; ".join(recommendation_parts)
-        info.append(f"📈 Оценка аналитиков: {recommendation_line}\n{format_source(rec_source)}")
+        info.append(f"📈 рейтинг: {recommendation_line}\n{format_source(rec_source)}")
     elif rec_source:
-        info.append(f"📈 Оценка аналитиков: данные недоступны\n{format_source(rec_source)}")
+        info.append(f"📈 рейтинг: данные недоступны\n{format_source(rec_source)}")
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {volume}")
     
     cycle_periods = [
@@ -501,7 +550,7 @@ def build_info_text(ticker, user_id=None):
     
     cycle_info = "\n".join(cycle_lines)
     chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
-    info.append(f"{cycle_info}\n{chart_link}")
+    info.append(f"{cycle_info}\n{format_source(chart_link)}")
     
     if approx_book_vol is not None:
         info.append(f"📥 Приближённая дневная ликвидность: ~{approx_book_vol} ед.")
@@ -609,6 +658,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
         await query.edit_message_text("Выберите пользователя:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "insights":
+        assets = user_assets.get(user_id, [])
+        if not assets:
+            await query.edit_message_text("У вас нет активов для сбора инсайтов.", reply_markup=main_menu())
+            return
+        lines = ["💡 Инсайты по вашим активам:", ""]
+        for t in assets:
+            insights = fetch_finviz_insights(t)
+            if insights:
+                lines.append(f"{get_display_name(t, user_id)}:")
+                for s in insights:
+                    lines.append(f"• {s}")
+                lines.append(f"{format_source(f'https://finviz.com/quote.ashx?t={t}&p=d')}")
+                lines.append("")
+        if len(lines) <= 2:
+            lines.append("Инсайты не найдены.")
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("group_user_"):
         target_user_id = int(query.data.split("_", 2)[2])
