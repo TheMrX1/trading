@@ -2390,8 +2390,13 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     ticker = context.args[0].upper()
     try:
-        text = build_sector_text(ticker, user_id)
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        text = build_info_text(ticker, user_id)
+        photo_url = get_finviz_chart_url(ticker)
+        await update.message.reply_photo(
+            photo=photo_url,
+            caption=text,
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
