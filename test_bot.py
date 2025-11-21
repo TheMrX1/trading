@@ -2493,28 +2493,41 @@ async def cmd_hotmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_url = "https://finviz.com/grp_image.ashx?bar_sector_t.png"
     map_url = "https://finviz.com/map.ashx"
     
+    temp_file = None
     try:
         # Download image
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
         }
         resp = requests.get(image_url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            temp_file = f"temp_map_{uuid4()}.png"
+        if resp.status_code == 200 and resp.content and len(resp.content) > 0:
+            # Use absolute path for temp file
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, f"temp_map_{uuid4()}.png")
+            
             with open(temp_file, "wb") as f:
                 f.write(resp.content)
             
-            caption = f"📊 <b>Карта рынка (Sectors)</b>\n\n<a href='{map_url}'>🔗 Открыть интерактивную карту Finviz</a>"
-            
-            with open(temp_file, "rb") as f:
-                await update.message.reply_photo(photo=f, caption=caption, parse_mode=ParseMode.HTML)
-            
-            # Delete file
-            os.remove(temp_file)
+            # Verify file was written
+            if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
+                caption = f"📊 <b>Карта рынка (Sectors)</b>\n\n<a href='{map_url}'>🔗 Открыть интерактивную карту Finviz</a>"
+                
+                with open(temp_file, "rb") as f:
+                    await update.message.reply_photo(photo=f, caption=caption, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"❌ Не удалось сохранить изображение. <a href='{map_url}'>Ссылка</a>", parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text(f"❌ Не удалось загрузить карту. <a href='{map_url}'>Ссылка</a>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"❌ Не удалось загрузить карту (код: {resp.status_code}). <a href='{map_url}'>Ссылка</a>", parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
+    finally:
+        # Delete file in finally block to ensure cleanup
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
 async def cmd_top_gainers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
