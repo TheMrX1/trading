@@ -155,7 +155,8 @@ def main_menu():
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
          InlineKeyboardButton("📊 Мои активы", callback_data="my_assets")],
         [InlineKeyboardButton("💡 Инсайты", callback_data="insights")],
-        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio")],
+        [InlineKeyboardButton("💼 Мой портфель", callback_data="my_portfolio"),
+         InlineKeyboardButton("👥 Инвестиции группы", callback_data="group_investments")],
         [InlineKeyboardButton("👥 Активы группы", callback_data="group_assets"),
          InlineKeyboardButton("🚫 Черный список", callback_data="blacklist")]
     ]
@@ -625,12 +626,113 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_trade_context.pop(user_id, None)
         await show_portfolio_menu(query, user_id)
 
+    elif query.data == "group_investments":
+        # Сбор данных по всем пользователям
+        sector_data = {}  # {Sector: [ (ticker, user_name, invested, current_val, profit_abs, profit_pct) ] }
+        
+        total_invested_all = 0.0
+        total_current_all = 0.0
+
+        for uid in TRUSTED_USERS:
+            u_name = get_user_name(uid)
+            portfolio = user_portfolio.get(uid, {})
+            
+            for ticker, pos in portfolio.items():
+                qty = pos.get("qty", 0)
+                if qty <= 0:
+                    continue
+                
+                avg_price = pos.get("avg_price", 0.0)
+                invested = qty * avg_price
+                
+                # Получаем текущую цену
+                current_price = 0.0
+                try:
+                    fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+                    current_price = fi.get("last_price")
+                except Exception:
+                    pass
+                
+                if not current_price:
+                    try:
+                        hist = yf.Ticker(ticker).history(period="5d")
+                        if not hist.empty:
+                            pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                            current_price = float(hist[pc].iloc[-1])
+                    except Exception:
+                        pass
+                
+                current_price = float(current_price or 0.0)
+                current_val = qty * current_price
+                
+                profit_abs = current_val - invested
+                profit_pct = (profit_abs / invested * 100.0) if invested > 0 else 0.0
+                
+                total_invested_all += invested
+                total_current_all += current_val
+                
+                # Получаем сектор
+                sector = "Неизвестный сектор"
+                try:
+                    info = yf.Ticker(ticker).info or {}
+                    sector = info.get("sector") or "Неизвестный сектор"
+                except Exception:
+                    pass
+                
+                if sector not in sector_data:
+                    sector_data[sector] = []
+                
+                sector_data[sector].append({
+                    "ticker": ticker,
+                    "user": u_name,
+                    "invested": invested,
+                    "current": current_val,
+                    "profit_abs": profit_abs,
+                    "profit_pct": profit_pct
+                })
+
+        if not sector_data:
+            await query.edit_message_text("Инвестиции группы пока пусты.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]))
+            return
+
+        lines = ["👥 <b>Инвестиции группы</b>", ""]
+        
+        sorted_sectors = sorted(sector_data.keys())
+        
+        for sec in sorted_sectors:
+            lines.append(f"🏷 <b>{sec}</b>")
+            sec_items = sector_data[sec]
+            sec_invested = 0.0
+            sec_current = 0.0
+            
+            for item in sec_items:
+                lines.append(f"• {item['ticker']} - {item['user']} - влож: {item['invested']:.0f}$ - сейчас: {item['current']:.0f}$ ({item['profit_abs']:+.0f}$ / {item['profit_pct']:+.1f}%)")
+                sec_invested += item['invested']
+                sec_current += item['current']
+            
+            sec_profit = sec_current - sec_invested
+            sec_pct = (sec_profit / sec_invested * 100.0) if sec_invested > 0 else 0.0
+            lines.append(f"<i>Total {sec}: {sec_invested:.0f}$ -> {sec_current:.0f}$ ({sec_profit:+.0f}$ / {sec_pct:+.1f}%)</i>")
+            lines.append("")
+
+        total_profit_all = total_current_all - total_invested_all
+        total_pct_all = (total_profit_all / total_invested_all * 100.0) if total_invested_all > 0 else 0.0
+        
+        lines.append(f"<b>TOTAL ALL: {total_invested_all:.0f}$ -> {total_current_all:.0f}$ ({total_profit_all:+.0f}$ / {total_pct_all:+.1f}%)</b>")
+
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
+        await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif query.data == "group_assets":
         keyboard = []
         has_assets = False
         for uid in TRUSTED_USERS:
             assets = user_assets.get(uid, [])
-            if assets:
+            # Также проверяем портфель, вдруг там есть позиции, но нет в списке наблюдения
+            portfolio = user_portfolio.get(uid, {})
+            has_portfolio = any(p.get("qty", 0) > 0 for p in portfolio.values())
+            
+            if assets or has_portfolio:
                 has_assets = True
                 user_display_name = get_user_name(uid)
                 keyboard.append([InlineKeyboardButton(user_display_name, callback_data=f"group_user_{uid}")])
@@ -659,16 +761,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data.startswith("group_user_"):
+    elif query.data.startswith("group_user_") and not query.data.startswith("group_user_assets_") and not query.data.startswith("group_user_portfolio_"):
         target_user_id = int(query.data.split("_", 2)[2])
+        u_name = get_user_name(target_user_id)
+        
+        keyboard = [
+            [InlineKeyboardButton("Активы пользователя", callback_data=f"group_user_assets_{target_user_id}")],
+            [InlineKeyboardButton("Портфель пользователя", callback_data=f"group_user_portfolio_{target_user_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="group_assets")]
+        ]
+        await query.edit_message_text(f"Пользователь: {u_name}\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("group_user_assets_"):
+        target_user_id = int(query.data.split("_", 3)[3])
         assets = user_assets.get(target_user_id, [])
         comments = user_comments.get(target_user_id, {})
         names = user_asset_names.get(target_user_id, {})
+        u_name = get_user_name(target_user_id)
 
         if not assets:
-            text = "У выбранного пользователя пока нет активов."
+            text = f"У пользователя {u_name} нет отслеживаемых активов."
         else:
-            lines = [f"👤 {get_user_name(target_user_id)}"]
+            lines = [f"👤 Активы пользователя {u_name}:", ""]
             for asset in assets:
                 company_name = names.get(asset)
                 if not company_name:
@@ -676,45 +790,72 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user_asset_names.setdefault(target_user_id, {})[asset] = company_name
                 ticker_name_cache[asset] = company_name
                 comment = comments.get(asset, "")
-                comment_part = f": {comment}" if comment else ""
-                lines.append(f"{company_name} ({asset}){comment_part}\n")
-
-            # Добавляем сводку по портфелю выбранного пользователя
-            positions = user_portfolio.get(target_user_id, {})
-            if positions:
-                total_change = 0.0
-                total_invested = 0.0
-                for tkr, pos in positions.items():
-                    qty = pos.get("qty", 0)
-                    avg_price = pos.get("avg_price", 0.0)
-                    current = None
-                    try:
-                        fi = getattr(yf.Ticker(tkr), "fast_info", {}) or {}
-                        current = fi.get("last_price")
-                    except Exception:
-                        current = None
-                    if current is None:
-                        try:
-                            hist = yf.Ticker(tkr).history(period="5d")
-                            if not hist.empty:
-                                pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
-                                current = float(hist[pc].iloc[-1])
-                        except Exception:
-                            current = None
-                    change_value = (current - avg_price) * qty if (current is not None) else 0.0
-                    total_change += change_value
-                    total_invested += (avg_price * qty)
+                comment_part = f"\n💬 {comment}" if comment else ""
+                lines.append(f"• <b>{company_name} ({asset})</b>{comment_part}")
                 lines.append("")
-                lines.append(f"инвестировано: {total_invested:.2f} USD")
-                pct_change = (total_change / total_invested * 100.0) if total_invested > 0 else 0.0
-                lines.append(f"заработок: {total_change:+.2f} USD ({pct_change:+.2f}%)")
-
             text = "\n".join(lines)
 
-        keyboard = [
-            [InlineKeyboardButton("⬅️ Назад", callback_data="group_assets")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"group_user_{target_user_id}")]]
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("group_user_portfolio_"):
+        target_user_id = int(query.data.split("_", 3)[3])
+        positions = user_portfolio.get(target_user_id, {})
+        u_name = get_user_name(target_user_id)
+        
+        # Удаляем нулевые позиции
+        tickers_to_delete = [t for t, p in positions.items() if p.get("qty", 0) <= 0]
+        for t in tickers_to_delete:
+            try:
+                del positions[t]
+            except Exception:
+                pass
+                
+        lines = [f"💼 Портфель пользователя {u_name}:\n"]
+        if not positions:
+            lines.append("Пока нет позиций.")
+        else:
+            total_change = 0.0
+            total_invested = 0.0
+            for ticker, pos in positions.items():
+                qty = pos.get("qty", 0)
+                avg_price = pos.get("avg_price", 0.0)
+                
+                # Получаем имя
+                name = user_asset_names.get(target_user_id, {}).get(ticker)
+                if not name:
+                    name = get_company_name(ticker)
+                
+                # Текущая цена
+                current = None
+                try:
+                    fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+                    current = fi.get("last_price")
+                except Exception:
+                    current = None
+                if current is None:
+                    try:
+                        hist = yf.Ticker(ticker).history(period="5d")
+                        if not hist.empty:
+                            pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                            current = float(hist[pc].iloc[-1])
+                    except Exception:
+                        current = None
+                
+                change_value = (current - avg_price) * qty if (current is not None) else 0.0
+                total_change += change_value
+                total_invested += (avg_price * qty)
+                
+                lines.append(f"• {name} ({ticker}), {qty} шт, {avg_price:.2f} -> { (current or 0.0):.2f} ({change_value:+.2f} USD)")
+                lines.append("")
+            
+            lines.append(f"инвестировано: {total_invested:.2f} USD")
+            pct_change = (total_change / total_invested * 100.0) if total_invested > 0 else 0.0
+            lines.append(f"заработок: {total_change:+.2f} USD ({pct_change:+.2f}%)")
+            lines.append("")
+
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"group_user_{target_user_id}")]]
+        await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "blacklist":
         blacklist_lines = ["🚫 Черный список:\n"]
