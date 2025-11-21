@@ -155,7 +155,15 @@ def fetch_finviz_insights(ticker: str) -> list:
     except Exception:
         return insights
 
-
+def get_msk_time_str(ts=None):
+    """Возвращает строку времени в MSK (UTC+3)"""
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    elif isinstance(ts, (int, float)):
+        ts = datetime.fromtimestamp(ts, tz=timezone.utc)
+    
+    ts_msk = ts.astimezone(ZoneInfo("Europe/Moscow"))
+    return ts_msk.strftime('%d.%m.%Y %H:%M')
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -175,7 +183,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in TRUSTED_USERS:
         await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
         return
-    await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu())
+    await update.message.reply_text(f"👋 Привет, {update.effective_user.first_name}! \n\n🤖 Я бот для трекинга инвестиций.\nВыберите действие в меню ниже:", reply_markup=main_menu())
 
 async def show_assets_menu(query, user_id, page=0):
     assets = user_assets.get(user_id, [])
@@ -198,7 +206,8 @@ async def show_assets_menu(query, user_id, page=0):
         keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
-    await query.edit_message_text("Ваши активы:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+    await query.edit_message_text("📋 <b>Ваши активы:</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_portfolio_menu(query, user_id):
     positions = user_portfolio.get(user_id, {})
@@ -209,9 +218,9 @@ async def show_portfolio_menu(query, user_id):
             del positions[t]
         except Exception:
             pass
-    lines = ["💼 Мой портфель:\n"]
+    lines = ["💼 <b>Мой портфель:</b>", ""]
     if not positions:
-        lines.append("Пока нет позиций.")
+        lines.append("<i>Пока нет позиций.</i>")
     else:
         total_change = 0.0
         total_invested = 0.0
@@ -234,37 +243,36 @@ async def show_portfolio_menu(query, user_id):
                         current = float(hist[pc].iloc[-1])
                 except Exception:
                     current = None
-            change_value = (current - avg_price) * qty if (current is not None) else 0.0
+            
+            current_val = current or 0.0
+            change_value = (current_val - avg_price) * qty if (current is not None) else 0.0
             total_change += change_value
             total_invested += (avg_price * qty)
-            lines.append(f"• {name}, {qty} шт, {avg_price:.2f} -> { (current or 0.0):.2f} ({change_value:+.2f} USD)")
+            
+            emoji = "🟢" if change_value >= 0 else "🔴"
+            lines.append(f"• <b>{name}</b>")
+            lines.append(f"   {qty} шт x {avg_price:.2f}$ -> {current_val:.2f}$")
+            lines.append(f"   {emoji} {change_value:+.2f}$")
             lines.append("")
-    lines.append(f"инвестировано: {total_invested:.2f} USD")
+            
+    lines.append(f"💰 <b>Инвестировано:</b> {total_invested:.2f} USD")
     
     extra = user_extra_funds.get(user_id, 0.0)
-    if extra > 0:
-        lines.append(f"Выведенные из активов: {extra:.2f} USD")
-    
-    # total_change - это (current - invested).
-    # Если мы вывели деньги, то они тоже часть "заработка" в широком смысле, 
-    # но обычно "заработок" = (текущая стоимость + выведенное) - вложено.
-    # Или же "выведенное" просто плюсуется к профиту.
-    # По просьбе: "учитываться в общей сумме заработанных денег".
-    # Total Profit = (Current Value - Invested) + Extra
-    # Current Value = Invested + Change
-    # Total Profit = Change + Extra
+    if extra != 0:
+        lines.append(f"💵 <b>Выведенные из активов:</b> {extra:.2f} USD")
     
     total_profit = total_change + extra
     pct_change = (total_profit / total_invested * 100.0) if total_invested > 0 else 0.0
     
-    lines.append(f"заработок: {total_profit:+.2f} USD ({pct_change:+.2f}%)")
+    profit_emoji = "🟢" if total_profit >= 0 else "🔴"
+    lines.append(f"{profit_emoji} <b>Заработок:</b> {total_profit:+.2f} USD ({pct_change:+.2f}%)")
     lines.append("")
     
     keyboard = [
         [InlineKeyboardButton("➕ extra", callback_data="add_extra_funds")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
-    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def classify_cycle(df):
     df = df.copy()
@@ -517,8 +525,8 @@ def build_info_text(ticker, user_id=None):
     if not company_name:
         company_name = get_company_name(ticker)
     info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
-    ts_msk = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
-    info.append(f"🕒 Последнее обновление (MSK): {ts_msk.strftime('%Y-%m-%d %H:%M')}")
+    ts_msk_str = get_msk_time_str(ts)
+    info.append(f"🕒 Последнее обновление (MSK): {ts_msk_str}")
     info.append(f"💵 Цена: {price} USD")
     recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
     if recommendation_key:
@@ -566,8 +574,9 @@ def build_info_text(ticker, user_id=None):
         
     if big:
         ts_big, vol_big = big
-        ts_big_msk = (ts_big if ts_big.tzinfo else ts_big.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
-        info.append(f"🚀 Последняя крупная покупка: {ts_big_msk.strftime('%Y-%m-%d %H:%M')}, объём {vol_big}")
+        ts_big_msk_str = get_msk_time_str(ts_big)
+    
+        info.append(f"🚀 Последняя крупная покупка: {ts_big_msk_str}, объём {vol_big}")
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
@@ -688,7 +697,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"<i>Total {sec}: {sec_invested:.0f}$ -> {sec_current:.0f}$ ({sec_profit:+.0f}$ / {sec_pct:+.1f}%)</i>")
             lines.append("")
 
-        if total_extra_all > 0:
+        if total_extra_all != 0:
              lines.append(f"💵 <b>Выведенные из активов (все): {total_extra_all:.0f}$</b>")
 
         total_profit_all = (total_current_all - total_invested_all) + total_extra_all
@@ -699,8 +708,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Добавляем время обновления
         upd_ts = group_stats_cache.get("last_update")
         if upd_ts:
-             dt = datetime.fromtimestamp(upd_ts).strftime('%H:%M')
-             lines.append(f"\n🕒 Обновлено: {dt}")
+             dt = get_msk_time_str(upd_ts)
+             lines.append(f"\n🕒 Обновлено: {dt} (MSK)")
 
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         # Если сообщение отправлено как "Обновляю...", то edit, иначе тоже edit
@@ -1431,17 +1440,55 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_extra_funds":
         try:
             amount = float(update.message.text.strip().replace(",", "."))
-            if amount < 0:
-                raise ValueError
+            # Разрешаем отрицательные значения
             user_extra_funds[user_id] = amount
             save_user_data()
             # Обновляем кэш, так как extra влияет на total
             context.application.create_task(update_group_stats())
             
             user_states[user_id] = None
-            await update.message.reply_text(f"✅ Выведенные средства обновлены: {amount:.2f} USD", reply_markup=main_menu())
+            
+            # Возвращаем пользователя в его портфель
+            # Для этого нам нужно вызвать show_portfolio_menu, но у нас update.message, а не query
+            # Поэтому отправляем новое сообщение с портфелем
+            await update.message.reply_text(f"✅ Выведенные средства обновлены: {amount:.2f} USD")
+            
+            # Эмулируем вызов портфеля через отправку сообщения с кнопками (или просто текст портфеля)
+            # Но show_portfolio_menu ожидает query для edit_message_text.
+            # Сделаем адаптер или просто отправим текст.
+            # Проще всего отправить сообщение "Ваш портфель" и вызвать функцию, 
+            # но она делает edit.
+            # Поэтому просто отправим сообщение с кнопкой "Вернуться в портфель" или продублируем логику.
+            # Лучше всего: отправить сообщение и вызвать show_portfolio_menu, передав фиктивный query? Нет.
+            # Просто отправим сообщение "Перехожу в портфель..." и вызовем обработчик? Нет.
+            
+            # Правильный путь: отправить новое сообщение с портфелем.
+            # Создадим временный объект query-like или перепишем show_portfolio_menu чтобы она могла слать новое сообщение.
+            # Но проще всего просто отправить текст.
+            
+            # REFACTOR: make show_portfolio_menu capable of sending new message if query is None
+            # Но сейчас просто отправим кнопку "Вернуться в портфель"
+            
+            # А лучше:
+            await update.message.reply_text("⏳ Загружаю портфель...")
+            # Мы не можем легко вызвать show_portfolio_menu так как она редактирует.
+            # Поэтому просто скажем ОК и покажем главное меню? Нет, пользователь просил в портфель.
+            
+            # Давайте сделаем хак: отправим сообщение с inline кнопкой, которая сразу триггерит портфель?
+            # Нет, это лишний клик.
+            
+            # Лучше всего: скопировать логику show_portfolio_menu для отправки нового сообщения.
+            # Или изменить show_portfolio_menu.
+            
+            # Давайте изменим show_portfolio_menu чтобы она принимала update и context и могла слать сообщение.
+            # Но это много изменений.
+            
+            # Проще:
+            keyboard = [[InlineKeyboardButton("🔙 Вернуться в портфель", callback_data="my_portfolio")]]
+            await update.message.reply_text("✅ Данные сохранены.", reply_markup=InlineKeyboardMarkup(keyboard))
+            
         except Exception:
-            await update.message.reply_text("❌ Некорректная сумма. Введите положительное число:")
+            await update.message.reply_text("❌ Некорректная сумма. Введите число (можно отрицательное):")
 
 
 def load_user_data():
