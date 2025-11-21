@@ -206,10 +206,9 @@ async def show_assets_menu(query, user_id, page=0):
         keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     await query.edit_message_text("📋 <b>Ваши активы:</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_portfolio_menu(query, user_id):
+def get_portfolio_text_and_keyboard(user_id):
     positions = user_portfolio.get(user_id, {})
     # Удаляем нулевые позиции из хранения
     tickers_to_delete = [t for t, p in positions.items() if p.get("qty", 0) <= 0]
@@ -249,10 +248,7 @@ async def show_portfolio_menu(query, user_id):
             total_change += change_value
             total_invested += (avg_price * qty)
             
-            emoji = "🟢" if change_value >= 0 else "🔴"
-            lines.append(f"• <b>{name}</b>")
-            lines.append(f"   {qty} шт x {avg_price:.2f}$ -> {current_val:.2f}$")
-            lines.append(f"   {emoji} {change_value:+.2f}$")
+            lines.append(f"• <b>{name}</b>, {qty} шт, {avg_price:.2f} -> {current_val:.2f} ({change_value:+.2f} USD)")
             lines.append("")
             
     lines.append(f"💰 <b>Инвестировано:</b> {total_invested:.2f} USD")
@@ -264,15 +260,18 @@ async def show_portfolio_menu(query, user_id):
     total_profit = total_change + extra
     pct_change = (total_profit / total_invested * 100.0) if total_invested > 0 else 0.0
     
-    profit_emoji = "🟢" if total_profit >= 0 else "🔴"
-    lines.append(f"{profit_emoji} <b>Заработок:</b> {total_profit:+.2f} USD ({pct_change:+.2f}%)")
+    lines.append(f"<b>Заработок:</b> {total_profit:+.2f} USD ({pct_change:+.2f}%)")
     lines.append("")
     
     keyboard = [
         [InlineKeyboardButton("➕ extra", callback_data="add_extra_funds")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
-    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+async def show_portfolio_menu(query, user_id):
+    text, reply_markup = get_portfolio_text_and_keyboard(user_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 def classify_cycle(df):
     df = df.copy()
@@ -1440,52 +1439,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_extra_funds":
         try:
             amount = float(update.message.text.strip().replace(",", "."))
-            # Разрешаем отрицательные значения
-            user_extra_funds[user_id] = amount
+            # Суммируем с текущим значением
+            current_extra = user_extra_funds.get(user_id, 0.0)
+            new_extra = current_extra + amount
+            user_extra_funds[user_id] = new_extra
             save_user_data()
             # Обновляем кэш, так как extra влияет на total
             context.application.create_task(update_group_stats())
             
             user_states[user_id] = None
             
-            # Возвращаем пользователя в его портфель
-            # Для этого нам нужно вызвать show_portfolio_menu, но у нас update.message, а не query
-            # Поэтому отправляем новое сообщение с портфелем
-            await update.message.reply_text(f"✅ Выведенные средства обновлены: {amount:.2f} USD")
+            await update.message.reply_text(f"✅ Добавлено: {amount:.2f} USD. Всего выведено: {new_extra:.2f} USD")
             
-            # Эмулируем вызов портфеля через отправку сообщения с кнопками (или просто текст портфеля)
-            # Но show_portfolio_menu ожидает query для edit_message_text.
-            # Сделаем адаптер или просто отправим текст.
-            # Проще всего отправить сообщение "Ваш портфель" и вызвать функцию, 
-            # но она делает edit.
-            # Поэтому просто отправим сообщение с кнопкой "Вернуться в портфель" или продублируем логику.
-            # Лучше всего: отправить сообщение и вызвать show_portfolio_menu, передав фиктивный query? Нет.
-            # Просто отправим сообщение "Перехожу в портфель..." и вызовем обработчик? Нет.
-            
-            # Правильный путь: отправить новое сообщение с портфелем.
-            # Создадим временный объект query-like или перепишем show_portfolio_menu чтобы она могла слать новое сообщение.
-            # Но проще всего просто отправить текст.
-            
-            # REFACTOR: make show_portfolio_menu capable of sending new message if query is None
-            # Но сейчас просто отправим кнопку "Вернуться в портфель"
-            
-            # А лучше:
-            await update.message.reply_text("⏳ Загружаю портфель...")
-            # Мы не можем легко вызвать show_portfolio_menu так как она редактирует.
-            # Поэтому просто скажем ОК и покажем главное меню? Нет, пользователь просил в портфель.
-            
-            # Давайте сделаем хак: отправим сообщение с inline кнопкой, которая сразу триггерит портфель?
-            # Нет, это лишний клик.
-            
-            # Лучше всего: скопировать логику show_portfolio_menu для отправки нового сообщения.
-            # Или изменить show_portfolio_menu.
-            
-            # Давайте изменим show_portfolio_menu чтобы она принимала update и context и могла слать сообщение.
-            # Но это много изменений.
-            
-            # Проще:
-            keyboard = [[InlineKeyboardButton("🔙 Вернуться в портфель", callback_data="my_portfolio")]]
-            await update.message.reply_text("✅ Данные сохранены.", reply_markup=InlineKeyboardMarkup(keyboard))
+            # Автоматически показываем портфель новым сообщением
+            text, reply_markup = get_portfolio_text_and_keyboard(user_id)
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
             
         except Exception:
             await update.message.reply_text("❌ Некорректная сумма. Введите число (можно отрицательное):")
