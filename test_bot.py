@@ -12,11 +12,15 @@ from telegram.constants import ParseMode
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineQueryResultArticle, InputTextMessageContent
+)
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
+    MessageHandler, filters, ContextTypes, InlineQueryHandler
 )
+from uuid import uuid4
 
 load_dotenv()
 BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
@@ -2001,10 +2005,166 @@ def fetch_analyst_recommendation(ticker):
     distribution = ", ".join(summary_lines) if summary_lines else None
     return recommendation_key, recommendation_mean, num_analysts, distribution, source
 
+async def post_init(application: Application):
+    """Выполняется после инициализации приложения, но до начала polling"""
+    logging.info("Запуск обновления статистики группы при старте...")
+    # Запускаем обновление в фоне (или ждем завершения, если критично)
+    # Лучше подождать, чтобы данные были готовы сразу
+    await update_group_stats()
+    logging.info("Статистика группы обновлена.")
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик inline-запросов"""
+    query = update.inline_query.query.strip().upper()
+    user_id = update.inline_query.from_user.id
+
+    if user_id not in TRUSTED_USERS:
+        return
+
+    results = []
+
+    # 1. Если запрос пустой - показываем общие опции
+    if not query:
+        # Портфель
+        port_text, _ = get_portfolio_text_and_keyboard(user_id)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="💼 Мой портфель",
+                description="Отправить сводку портфеля",
+                input_message_content=InputTextMessageContent(
+                    message_text=port_text,
+                    parse_mode=ParseMode.HTML
+                )
+            )
+        )
+        
+        # Группа
+        data = group_stats_cache.get("data", {})
+        if data:
+            total_invested = data.get("total_invested", 0.0)
+            total_current = data.get("total_current", 0.0)
+            total_profit = total_current - total_invested
+            pct = (total_profit / total_invested * 100) if total_invested else 0
+            
+            group_text = (f"👥 <b>Инвестиции группы</b>\n"
+                          f"Вложено: {total_invested:.0f} USD\n"
+                          f"Сейчас: {total_current:.0f} USD\n"
+                          f"Прибыль: {total_profit:+.0f} USD ({pct:+.1f}%)")
+            
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="👥 Инвестиции группы",
+                    description=f"Total: {total_current:.0f}$ ({pct:+.1f}%)",
+                    input_message_content=InputTextMessageContent(
+                        message_text=group_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                )
+            )
+            
+        results.append(
+             InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="🔍 Поиск котировок",
+                description="Введите тикер (например, AAPL)",
+                input_message_content=InputTextMessageContent(
+                    message_text="Чтобы найти котировку, введите @botname TICKER"
+                )
+            )
+        )
+    
+    # 2. Обработка специальных команд
+    elif query == "PORTFOLIO" or query == "ПОРТФЕЛЬ":
+        text, _ = get_portfolio_text_and_keyboard(user_id)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="💼 Мой портфель",
+                description="Текущее состояние портфеля",
+                input_message_content=InputTextMessageContent(
+                    message_text=text,
+                    parse_mode=ParseMode.HTML
+                )
+            )
+        )
+
+    elif query == "GROUP" or query == "ГРУППА":
+        # Генерируем текст группы (упрощенно, без кэша update если он стар, но мы берем из кэша)
+        data = group_stats_cache.get("data", {})
+        if data:
+            total_invested = data.get("total_invested", 0.0)
+            total_current = data.get("total_current", 0.0)
+            total_profit = total_current - total_invested
+            pct = (total_profit / total_invested * 100) if total_invested else 0
+            
+            text = (f"👥 <b>Инвестиции группы</b>\n"
+                    f"Вложено: {total_invested:.0f} USD\n"
+                    f"Сейчас: {total_current:.0f} USD\n"
+                    f"Прибыль: {total_profit:+.0f} USD ({pct:+.1f}%)")
+            
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="👥 Инвестиции группы",
+                    description=f"Total: {total_current:.0f}$ ({pct:+.1f}%)",
+                    input_message_content=InputTextMessageContent(
+                        message_text=text,
+                        parse_mode=ParseMode.HTML
+                    )
+                )
+            )
+
+    # 3. Поиск тикера (если длина < 6 и это буквы)
+    elif len(query) < 6 and query.isalpha():
+        ticker = query
+        try:
+            # Пытаемся получить данные
+            stock = yf.Ticker(ticker)
+            fi = getattr(stock, "fast_info", {})
+            price = fi.get("last_price")
+            
+            if price:
+                # Получаем имя
+                name = get_company_name(ticker)
+                
+                # Формируем текст
+                text = f"ℹ️ <b>{name} ({ticker})</b>\n"
+                text += f"💵 Цена: {price:.2f} USD\n"
+                
+                # Можно добавить изменение за день если есть
+                try:
+                    prev_close = fi.get("previous_close")
+                    if prev_close:
+                        change = price - prev_close
+                        pct = (change / prev_close) * 100
+                        emoji = "🟢" if change >= 0 else "🔴"
+                        text += f"Изменение: {emoji} {change:+.2f} ({pct:+.2f}%)"
+                except:
+                    pass
+
+                results.append(
+                    InlineQueryResultArticle(
+                        id=str(uuid4()),
+                        title=f"{ticker} - {price:.2f} USD",
+                        description=f"{name}",
+                        input_message_content=InputTextMessageContent(
+                            message_text=text,
+                            parse_mode=ParseMode.HTML
+                        )
+                    )
+                )
+        except Exception:
+            pass
+
+    await update.inline_query.answer(results, cache_time=10) # cache_time=0 for debug
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.run_polling(drop_pending_updates=True)
 
