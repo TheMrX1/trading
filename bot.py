@@ -2001,8 +2001,16 @@ def fetch_analyst_recommendation(ticker):
     distribution = ", ".join(summary_lines) if summary_lines else None
     return recommendation_key, recommendation_mean, num_analysts, distribution, source
 
+async def post_init(application: Application):
+    """Выполняется после инициализации приложения, но до начала polling"""
+    logging.info("Запуск обновления статистики группы при старте...")
+    # Запускаем обновление в фоне (или ждем завершения, если критично)
+    # Лучше подождать, чтобы данные были готовы сразу
+    await update_group_stats()
+    logging.info("Статистика группы обновлена.")
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
