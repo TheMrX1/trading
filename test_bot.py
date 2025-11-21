@@ -598,6 +598,88 @@ def build_info_text(ticker, user_id=None):
 
     return "\n\n".join(info)
 
+def build_ticker_info_text(ticker, user_id=None):
+    """Упрощенная версия информации для команды /ticker"""
+    stock = yf.Ticker(ticker)
+    
+    # Получаем актуальную цену
+    current_price = None
+    try:
+        fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+        current_price = fi.get("last_price")
+    except Exception:
+        current_price = None
+    if current_price is None:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if not hist.empty:
+                pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                current_price = float(hist[pc].iloc[-1])
+        except Exception:
+            current_price = None
+    
+    price = round(current_price, 4) if current_price is not None else None
+    
+    # Получаем название компании
+    company_name = None
+    if user_id:
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+    if not company_name:
+        company_name = ticker_name_cache.get(ticker)
+    if not company_name:
+        company_name = get_company_name(ticker)
+    
+    info = []
+    info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
+    
+    # Цена
+    if price is not None:
+        info.append(f"💵 Цена: {price} USD")
+    else:
+        info.append("💵 Цена: данные недоступны")
+    
+    # Совет от трейдеров
+    recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
+    if recommendation_key:
+        info.append(f"🎯 Совет: {recommendation_key}")
+    elif rec_source:
+        info.append("🎯 Совет: данные недоступны")
+    
+    # Стадии цикла
+    cycle_periods = [
+        (5, "5d", "5m"),
+        (30, "1mo", "1d"),
+        (90, "3mo", "1d"),
+        (180, "6mo", "1d"),
+        (365, "1y", "1d")
+    ]
+    
+    cycle_lines = ["🧭 Стадия цикла:"]
+    for days, label, interval in cycle_periods:
+        if days <= 30:
+            period_df = stock.history(period=f"{days}d", interval=interval)
+        else:
+            if days == 90:
+                period_df = stock.history(period="3mo", interval=interval)
+            elif days == 180:
+                period_df = stock.history(period="6mo", interval=interval)
+            elif days == 365:
+                period_df = stock.history(period="1y", interval=interval)
+            else:
+                period_df = stock.history(period=f"{days}d", interval=interval)
+        
+        if not period_df.empty:
+            period_stage = classify_cycle(period_df)
+            cycle_lines.append(f"{label}: {period_stage}")
+        else:
+            cycle_lines.append(f"{label}: данные недоступны")
+    
+    cycle_info = "\n".join(cycle_lines)
+    chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
+    info.append(f"{cycle_info}\n{format_source(chart_link)}")
+    
+    return "\n\n".join(info)
+
 def build_sector_text(ticker, user_id=None):
     ticker = ticker.upper()
     stock = yf.Ticker(ticker)
@@ -2390,7 +2472,7 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     ticker = context.args[0].upper()
     try:
-        text = build_info_text(ticker, user_id)
+        text = build_ticker_info_text(ticker, user_id)
         photo_url = get_finviz_chart_url(ticker)
         await update.message.reply_photo(
             photo=photo_url,
