@@ -56,6 +56,12 @@ user_portfolio = {}  # {user_id: {ticker: {"qty": int, "avg_price": float}}}
 # Временный контекст для сделок
 user_trade_context = {}
 
+# Дополнительные выведенные средства
+user_extra_funds = {}  # {user_id: float}
+
+# Кэш статистики группы
+group_stats_cache = {}  # {"last_update": ts, "data": {...}}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -149,7 +155,16 @@ def fetch_finviz_insights(ticker: str) -> list:
     except Exception:
         return insights
 
-
+def get_msk_time_str(ts=None):
+    """Возвращает строку времени в MSK (UTC+3)"""
+    if ts is None:
+        ts = time.time()
+    elif isinstance(ts, datetime):
+        ts = ts.timestamp()
+    
+    # Direct conversion from timestamp to MSK datetime
+    dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Europe/Moscow"))
+    return dt.strftime('%d.%m.%Y %H:%M')
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -169,7 +184,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in TRUSTED_USERS:
         await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
         return
-    await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu())
+    
+    name = get_user_name(user_id)
+    text = (f"👋 Привет, {name}!\n\n"
+            "Я разработан... Да впринципе Вам пофигу, Кем. А в остальном, желаю удачи и приятного использования")
+    
+    keyboard = [[InlineKeyboardButton("главное меню", callback_data="show_main_menu")]]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_assets_menu(query, user_id, page=0):
     assets = user_assets.get(user_id, [])
@@ -192,9 +213,9 @@ async def show_assets_menu(query, user_id, page=0):
         keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
-    await query.edit_message_text("Ваши активы:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("📋 <b>Ваши активы:</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_portfolio_menu(query, user_id):
+def get_portfolio_text_and_keyboard(user_id):
     positions = user_portfolio.get(user_id, {})
     # Удаляем нулевые позиции из хранения
     tickers_to_delete = [t for t, p in positions.items() if p.get("qty", 0) <= 0]
@@ -203,9 +224,9 @@ async def show_portfolio_menu(query, user_id):
             del positions[t]
         except Exception:
             pass
-    lines = ["💼 Мой портфель:\n"]
+    lines = ["💼 <b>Мой портфель:</b>", ""]
     if not positions:
-        lines.append("Пока нет позиций.")
+        lines.append("<i>Пока нет позиций.</i>")
     else:
         total_change = 0.0
         total_invested = 0.0
@@ -228,19 +249,36 @@ async def show_portfolio_menu(query, user_id):
                         current = float(hist[pc].iloc[-1])
                 except Exception:
                     current = None
-            change_value = (current - avg_price) * qty if (current is not None) else 0.0
+            
+            current_val = current or 0.0
+            change_value = (current_val - avg_price) * qty if (current is not None) else 0.0
             total_change += change_value
             total_invested += (avg_price * qty)
-            lines.append(f"• {name}, {qty} шт, {avg_price:.2f} -> { (current or 0.0):.2f} ({change_value:+.2f} USD)")
+            
+            lines.append(f"• <b>{name}</b>, {qty} шт, {avg_price:.2f} -> {current_val:.2f} ({change_value:+.2f} USD)")
             lines.append("")
-        lines.append(f"инвестировано: {total_invested:.2f} USD")
-        pct_change = (total_change / total_invested * 100.0) if total_invested > 0 else 0.0
-        lines.append(f"заработок: {total_change:+.2f} USD ({pct_change:+.2f}%)")
-        lines.append("")
+            
+    lines.append(f"💰 <b>Инвестировано:</b> {total_invested:.2f} USD")
+    
+    extra = user_extra_funds.get(user_id, 0.0)
+    if extra != 0:
+        lines.append(f"💵 <b>Выведенные из активов:</b> {extra:.2f} USD")
+    
+    total_profit = total_change + extra
+    pct_change = (total_profit / total_invested * 100.0) if total_invested > 0 else 0.0
+    
+    lines.append(f"<b>Заработок:</b> {total_profit:+.2f} USD ({pct_change:+.2f}%)")
+    lines.append("")
+    
     keyboard = [
+        [InlineKeyboardButton("➕ extra", callback_data="add_extra_funds")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")]
     ]
-    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+async def show_portfolio_menu(query, user_id):
+    text, reply_markup = get_portfolio_text_and_keyboard(user_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 def classify_cycle(df):
     df = df.copy()
@@ -493,8 +531,8 @@ def build_info_text(ticker, user_id=None):
     if not company_name:
         company_name = get_company_name(ticker)
     info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
-    ts_msk = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
-    info.append(f"🕒 Последнее обновление (MSK): {ts_msk.strftime('%Y-%m-%d %H:%M')}")
+    ts_msk_str = get_msk_time_str(ts)
+    info.append(f"🕒 Последнее обновление (MSK): {ts_msk_str}")
     info.append(f"💵 Цена: {price} USD")
     recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
     if recommendation_key:
@@ -542,8 +580,9 @@ def build_info_text(ticker, user_id=None):
         
     if big:
         ts_big, vol_big = big
-        ts_big_msk = (ts_big if ts_big.tzinfo else ts_big.replace(tzinfo=timezone.utc)).astimezone(ZoneInfo("Europe/Moscow"))
-        info.append(f"🚀 Последняя крупная покупка: {ts_big_msk.strftime('%Y-%m-%d %H:%M')}, объём {vol_big}")
+        ts_big_msk_str = get_msk_time_str(ts_big)
+    
+        info.append(f"🚀 Последняя крупная покупка: {ts_big_msk_str}, объём {vol_big}")
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
@@ -608,7 +647,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⛔ Нет доступа.")
         return
 
-    if query.data == "add_asset":
+    elif query.data == "show_main_menu":
+        await query.edit_message_text("Главное меню:", reply_markup=main_menu())
+
+    elif query.data == "add_asset":
         user_states[user_id] = "waiting_for_asset"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("Введите тикер актива (например, AAPL):",
@@ -627,77 +669,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_portfolio_menu(query, user_id)
 
     elif query.data == "group_investments":
-        # Сбор данных по всем пользователям
-        sector_data = {}  # {Sector: [ (ticker, user_name, invested, current_val, profit_abs, profit_pct) ] }
-        
-        total_invested_all = 0.0
-        total_current_all = 0.0
-
-        for uid in TRUSTED_USERS:
-            u_name = get_user_name(uid)
-            portfolio = user_portfolio.get(uid, {})
+        # Используем кэш
+        if not group_stats_cache:
+            await query.edit_message_text("⏳ Обновляю данные группы, подождите...", reply_markup=None)
+            await update_group_stats()
             
-            for ticker, pos in portfolio.items():
-                qty = pos.get("qty", 0)
-                if qty <= 0:
-                    continue
-                
-                avg_price = pos.get("avg_price", 0.0)
-                invested = qty * avg_price
-                
-                # Получаем текущую цену
-                current_price = 0.0
-                try:
-                    fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
-                    current_price = fi.get("last_price")
-                except Exception:
-                    pass
-                
-                if not current_price:
-                    try:
-                        hist = yf.Ticker(ticker).history(period="5d")
-                        if not hist.empty:
-                            pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
-                            current_price = float(hist[pc].iloc[-1])
-                    except Exception:
-                        pass
-                
-                current_price = float(current_price or 0.0)
-                current_val = qty * current_price
-                
-                profit_abs = current_val - invested
-                profit_pct = (profit_abs / invested * 100.0) if invested > 0 else 0.0
-                
-                total_invested_all += invested
-                total_current_all += current_val
-                
-                # Получаем сектор
-                sector = "Неизвестный сектор"
-                try:
-                    info = yf.Ticker(ticker).info or {}
-                    sector = info.get("sector") or "Неизвестный сектор"
-                except Exception:
-                    pass
-                
-                if sector not in sector_data:
-                    sector_data[sector] = []
-                
-                sector_data[sector].append({
-                    "ticker": ticker,
-                    "user": u_name,
-                    "invested": invested,
-                    "current": current_val,
-                    "profit_abs": profit_abs,
-                    "profit_pct": profit_pct
-                })
-
-        if not sector_data:
-            await query.edit_message_text("Инвестиции группы пока пусты.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]))
-            return
+        # Формируем отчет из кэша
+        data = group_stats_cache.get("data", {})
+        if not data:
+             await query.edit_message_text("Инвестиции группы пока пусты.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]))
+             return
 
         lines = ["👥 <b>Инвестиции группы</b>", ""]
         
+        sector_data = data.get("sectors", {})
         sorted_sectors = sorted(sector_data.keys())
+        
+        total_invested_all = data.get("total_invested", 0.0)
+        total_current_all = data.get("total_current", 0.0)
+        total_extra_all = data.get("total_extra", 0.0)
         
         for sec in sorted_sectors:
             lines.append(f"🏷 <b>{sec}</b>")
@@ -706,6 +696,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sec_current = 0.0
             
             for item in sec_items:
+                # item: {ticker, user, invested, current, profit_abs, profit_pct}
                 lines.append(f"• {item['ticker']} - {item['user']} - влож: {item['invested']:.0f}$ - сейчас: {item['current']:.0f}$ ({item['profit_abs']:+.0f}$ / {item['profit_pct']:+.1f}%)")
                 sec_invested += item['invested']
                 sec_current += item['current']
@@ -715,13 +706,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"<i>Total {sec}: {sec_invested:.0f}$ -> {sec_current:.0f}$ ({sec_profit:+.0f}$ / {sec_pct:+.1f}%)</i>")
             lines.append("")
 
-        total_profit_all = total_current_all - total_invested_all
+        if total_extra_all != 0:
+             lines.append(f"💵 <b>Выведенные из активов (все): {total_extra_all:.0f}$</b>")
+
+        total_profit_all = (total_current_all - total_invested_all) + total_extra_all
         total_pct_all = (total_profit_all / total_invested_all * 100.0) if total_invested_all > 0 else 0.0
         
         lines.append(f"<b>TOTAL ALL: {total_invested_all:.0f}$ -> {total_current_all:.0f}$ ({total_profit_all:+.0f}$ / {total_pct_all:+.1f}%)</b>")
+        
+        # Добавляем время обновления
+        upd_ts = group_stats_cache.get("last_update")
+        if upd_ts:
+             dt = get_msk_time_str(upd_ts)
+             lines.append(f"\n🕒 Обновлено: {dt} (MSK)")
 
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
-        await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        # Если сообщение отправлено как "Обновляю...", то edit, иначе тоже edit
+        try:
+            await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+             # Если сообщение не изменилось или устарело
+             await context.bot.send_message(chat_id=query.message.chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "group_assets":
         keyboard = []
@@ -952,6 +957,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not user_assets[user_id]:
                 del user_assets[user_id]
             save_user_data()
+            # Обновляем кэш группы в фоне
+            context.application.create_task(update_group_stats())
             await query.edit_message_text(f"✅ Актив {ticker} успешно удален!", reply_markup=main_menu())
         else:
             await query.edit_message_text(f"❌ Актив {ticker} не найден в вашем списке.", reply_markup=main_menu())
@@ -1102,6 +1109,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pos["qty"] += qty
             pos["avg_price"] = total_cost / max(pos["qty"], 1)
             save_user_data()
+            context.application.create_task(update_group_stats())
             await query.edit_message_text(f"✅ Покупка по рынку: {ticker} {qty} @ {price_exec:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
             user_trade_context.pop(user_id, None)
             await query.message.reply_text("Главное меню:", reply_markup=main_menu())
@@ -1213,6 +1221,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_trade_context[user_id] = {"action": "buy", "ticker": ticker, "step": "qty", "back_to": back_to}
         await query.edit_message_text("Введите количество акций для покупки:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_to)]]))
 
+    elif query.data == "add_extra_funds":
+        user_states[user_id] = "waiting_for_extra_funds"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]
+        await query.edit_message_text("Введите сумму выведенных средств (в USD):", reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif query.data.startswith("sell_") or query.data == "sell_start":
         ticker = query.data.split("_", 1)[1] if "_" in query.data else None
         back_to = f"asset_{ticker}" if ticker else "my_portfolio"
@@ -1256,6 +1269,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
                 save_user_data()
+                context.application.create_task(update_group_stats())
                 await update.message.reply_text(f"✅ Продажа выполнена: {ticker} {sell_qty}")
             user_trade_context.pop(user_id, None)
             await update.message.reply_text("Главное меню:", reply_markup=main_menu())
@@ -1294,6 +1308,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pos["qty"] += qty
         pos["avg_price"] = total_cost / max(pos["qty"], 1)
         save_user_data()
+        context.application.create_task(update_group_stats())
         user_trade_context.pop(user_id, None)
         await update.message.reply_text(f"✅ Добавлено в портфель: {ticker} {qty} @ {price:.2f}")
         await update.message.reply_text("Главное меню:", reply_markup=main_menu())
@@ -1365,6 +1380,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ticker_name_cache[ticker] = company_name
             
             save_user_data()
+            context.application.create_task(update_group_stats())
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен с комментарием '{comment}'!", reply_markup=main_menu())
@@ -1425,14 +1441,37 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ticker_name_cache[ticker] = company_name
             
             save_user_data()
+            context.application.create_task(update_group_stats())
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} принудительно добавлен с комментарием '{comment}'!", reply_markup=main_menu())
 
+    elif user_states.get(user_id) == "waiting_for_extra_funds":
+        try:
+            amount = float(update.message.text.strip().replace(",", "."))
+            # Суммируем с текущим значением
+            current_extra = user_extra_funds.get(user_id, 0.0)
+            new_extra = current_extra + amount
+            user_extra_funds[user_id] = new_extra
+            save_user_data()
+            # Обновляем кэш, так как extra влияет на total
+            context.application.create_task(update_group_stats())
+            
+            user_states[user_id] = None
+            
+            await update.message.reply_text(f"✅ Добавлено: {amount:.2f} USD. Всего выведено: {new_extra:.2f} USD")
+            
+            # Автоматически показываем портфель новым сообщением
+            text, reply_markup = get_portfolio_text_and_keyboard(user_id)
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            
+        except Exception:
+            await update.message.reply_text("❌ Некорректная сумма. Введите число (можно отрицательное):")
+
 
 def load_user_data():
     """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache, user_portfolio
+    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache, user_portfolio, user_extra_funds
     try:
         users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
         
@@ -1457,6 +1496,7 @@ def load_user_data():
                 user_comments[current_user_id] = {}
                 user_asset_names[current_user_id] = {}
                 user_portfolio[current_user_id] = {}
+                user_extra_funds[current_user_id] = 0.0
                 user_settings[current_user_id] = {
                     "eps_bp": 5,
                     "big_buy_mult": 2,
@@ -1473,6 +1513,8 @@ def load_user_data():
                 current_section = "portfolio"
             elif line.startswith("SETTINGS:") and current_user_id:
                 current_section = "settings"
+            elif line.startswith("EXTRA_FUNDS:") and current_user_id:
+                current_section = "extra_funds"
             elif current_section == "assets" and current_user_id:
                 if line == "END_ASSETS":
                     current_section = None
@@ -1511,6 +1553,14 @@ def load_user_data():
                             user_portfolio[current_user_id][t] = {"qty": int(q_str), "avg_price": float(ap_str)}
                         except Exception:
                             pass
+            elif current_section == "extra_funds" and current_user_id:
+                if line == "END_EXTRA_FUNDS":
+                    current_section = None
+                else:
+                    try:
+                        user_extra_funds[current_user_id] = float(line)
+                    except Exception:
+                        pass
     except Exception as e:
         logging.error(f"Ошибка при загрузке данных пользователей: {e}")
         user_assets = {}
@@ -1518,7 +1568,9 @@ def load_user_data():
         user_asset_names = {}
         user_settings = {}
         ticker_name_cache = {}
+        ticker_name_cache = {}
         user_portfolio = {}
+        user_extra_funds = {}
 
 def save_user_data():
     """Сохраняет данные пользователей в файл users.txt"""
@@ -1552,6 +1604,10 @@ def save_user_data():
                     f.write(f"{t}={pos.get('qty', 0)},{pos.get('avg_price', 0.0)}\n")
                 f.write("END_PORTFOLIO\n")
 
+                f.write("EXTRA_FUNDS:\n")
+                f.write(f"{user_extra_funds.get(user_id, 0.0)}\n")
+                f.write("END_EXTRA_FUNDS\n")
+
                 f.write("SETTINGS:\n")
                 settings = {
                     "eps_bp": 5,
@@ -1567,6 +1623,107 @@ def save_user_data():
         logging.error(f"Ошибка при сохранении данных пользователей: {e}")
 
 load_user_data()
+
+def load_group_cache():
+    global group_stats_cache
+    try:
+        cache_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "group_stats.json")
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                group_stats_cache = json.load(f)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки кэша группы: {e}")
+        group_stats_cache = {}
+
+def save_group_cache():
+    try:
+        cache_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "group_stats.json")
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(group_stats_cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Ошибка сохранения кэша группы: {e}")
+
+load_group_cache()
+
+async def update_group_stats():
+    """Фоновая задача для обновления статистики группы"""
+    global group_stats_cache
+    
+    sector_data = {}
+    total_invested_all = 0.0
+    total_current_all = 0.0
+    
+    # Считаем extra funds
+    total_extra_all = sum(user_extra_funds.values())
+
+    for uid in TRUSTED_USERS:
+        u_name = get_user_name(uid)
+        portfolio = user_portfolio.get(uid, {})
+        
+        for ticker, pos in portfolio.items():
+            qty = pos.get("qty", 0)
+            if qty <= 0:
+                continue
+            
+            avg_price = pos.get("avg_price", 0.0)
+            invested = qty * avg_price
+            
+            # Получаем текущую цену
+            current_price = 0.0
+            try:
+                fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+                current_price = fi.get("last_price")
+            except Exception:
+                pass
+            
+            if not current_price:
+                try:
+                    hist = yf.Ticker(ticker).history(period="5d")
+                    if not hist.empty:
+                        pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                        current_price = float(hist[pc].iloc[-1])
+                except Exception:
+                    pass
+            
+            current_price = float(current_price or 0.0)
+            current_val = qty * current_price
+            
+            profit_abs = current_val - invested
+            profit_pct = (profit_abs / invested * 100.0) if invested > 0 else 0.0
+            
+            total_invested_all += invested
+            total_current_all += current_val
+            
+            # Получаем сектор
+            sector = "Неизвестный сектор"
+            try:
+                info = yf.Ticker(ticker).info or {}
+                sector = info.get("sector") or "Неизвестный сектор"
+            except Exception:
+                pass
+            
+            if sector not in sector_data:
+                sector_data[sector] = []
+            
+            sector_data[sector].append({
+                "ticker": ticker,
+                "user": u_name,
+                "invested": invested,
+                "current": current_val,
+                "profit_abs": profit_abs,
+                "profit_pct": profit_pct
+            })
+
+    group_stats_cache = {
+        "last_update": time.time(),
+        "data": {
+            "sectors": sector_data,
+            "total_invested": total_invested_all,
+            "total_current": total_current_all,
+            "total_extra": total_extra_all
+        }
+    }
+    save_group_cache()
 
 def load_blacklist():
     """Загружает черный список из файла blacklist.txt"""
