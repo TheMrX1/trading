@@ -12,11 +12,15 @@ from telegram.constants import ParseMode
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineQueryResultArticle, InputTextMessageContent
+)
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
+    MessageHandler, filters, ContextTypes, InlineQueryHandler
 )
+from uuid import uuid4
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -592,6 +596,88 @@ def build_info_text(ticker, user_id=None):
     elif user_comment:
         info.append(f"💬 Комментарий: {user_comment}")
 
+    return "\n\n".join(info)
+
+def build_ticker_info_text(ticker, user_id=None):
+    """Упрощенная версия информации для команды /ticker"""
+    stock = yf.Ticker(ticker)
+    
+    # Получаем актуальную цену
+    current_price = None
+    try:
+        fi = getattr(yf.Ticker(ticker), "fast_info", {}) or {}
+        current_price = fi.get("last_price")
+    except Exception:
+        current_price = None
+    if current_price is None:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if not hist.empty:
+                pc = "Adj Close" if "Adj Close" in hist.columns else "Close"
+                current_price = float(hist[pc].iloc[-1])
+        except Exception:
+            current_price = None
+    
+    price = round(current_price, 4) if current_price is not None else None
+    
+    # Получаем название компании
+    company_name = None
+    if user_id:
+        company_name = user_asset_names.get(user_id, {}).get(ticker)
+    if not company_name:
+        company_name = ticker_name_cache.get(ticker)
+    if not company_name:
+        company_name = get_company_name(ticker)
+    
+    info = []
+    info.append(f"ℹ️ {company_name} ({ticker})" if company_name != ticker else f"ℹ️ {ticker}")
+    
+    # Цена
+    if price is not None:
+        info.append(f"💵 Цена: {price} USD")
+    else:
+        info.append("💵 Цена: данные недоступны")
+    
+    # Совет от трейдеров
+    recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
+    if recommendation_key:
+        info.append(f"🎯 Совет: {recommendation_key}")
+    elif rec_source:
+        info.append("🎯 Совет: данные недоступны")
+    
+    # Стадии цикла
+    cycle_periods = [
+        (5, "5d", "5m"),
+        (30, "1mo", "1d"),
+        (90, "3mo", "1d"),
+        (180, "6mo", "1d"),
+        (365, "1y", "1d")
+    ]
+    
+    cycle_lines = ["🧭 Стадия цикла:"]
+    for days, label, interval in cycle_periods:
+        if days <= 30:
+            period_df = stock.history(period=f"{days}d", interval=interval)
+        else:
+            if days == 90:
+                period_df = stock.history(period="3mo", interval=interval)
+            elif days == 180:
+                period_df = stock.history(period="6mo", interval=interval)
+            elif days == 365:
+                period_df = stock.history(period="1y", interval=interval)
+            else:
+                period_df = stock.history(period=f"{days}d", interval=interval)
+        
+        if not period_df.empty:
+            period_stage = classify_cycle(period_df)
+            cycle_lines.append(f"{label}: {period_stage}")
+        else:
+            cycle_lines.append(f"{label}: данные недоступны")
+    
+    cycle_info = "\n".join(cycle_lines)
+    chart_link = f"https://finance.yahoo.com/quote/{ticker}/chart?p={ticker}"
+    info.append(f"{cycle_info}\n{format_source(chart_link)}")
+    
     return "\n\n".join(info)
 
 def build_sector_text(ticker, user_id=None):
@@ -1392,7 +1478,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Введите комментарий для добавления {ticker} в черный список:",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
                                       
-    elif user_states.get(user_id, "").startswith("waiting_for_blacklist_comment_"):
+    elif (user_states.get(user_id) or "").startswith("waiting_for_blacklist_comment_"):
         parts = user_states[user_id].split("_", 4)
         if len(parts) >= 5:
             ticker = parts[4]
@@ -1422,7 +1508,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user_states[user_id] = None
         
-    elif user_states.get(user_id, "").startswith("force_add_"):
+    elif (user_states.get(user_id) or "").startswith("force_add_"):
         parts = user_states[user_id].split("_", 2)
         if len(parts) >= 3:
             ticker = parts[2]
@@ -2001,6 +2087,163 @@ def fetch_analyst_recommendation(ticker):
     distribution = ", ".join(summary_lines) if summary_lines else None
     return recommendation_key, recommendation_mean, num_analysts, distribution, source
 
+def fetch_finviz_screener(signal="ta_topgainers"):
+    """Fetches top gainers or losers from Finviz screener."""
+    url = f"https://finviz.com/screener.ashx?v=110&s={signal}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Finviz screener table usually has class "table-light" or similar. 
+        # We look for rows in the main table.
+        # A robust way is to find the table with id "screener-views-table" or similar, 
+        # but Finviz changes often. Let's try to find rows with ticker links.
+        
+        rows = soup.select("tr[valign='top']") # Common for finviz data rows
+        results = []
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 10:
+                continue
+            
+            # Usually: 1=Ticker, 8=Price, 9=Change
+            # This is fragile and depends on the specific view (v=110 is Overview)
+            # v=110 Overview columns: No, Ticker, Company, Sector, Industry, Country, Market Cap, P/E, Price, Change, Volume
+            
+            try:
+                ticker_col = cols[1].text.strip()
+                price_col = cols[8].text.strip()
+                change_col = cols[9].text.strip()
+                
+                # Verify it looks like a ticker
+                if not ticker_col.isalpha() or len(ticker_col) > 6:
+                    continue
+                    
+                results.append({
+                    "ticker": ticker_col,
+                    "price": price_col,
+                    "change": change_col
+                })
+                if len(results) >= 10:
+                    break
+            except Exception:
+                continue
+                
+        return results
+    except Exception as e:
+        logging.error(f"Error fetching screener {signal}: {e}")
+        return []
+
+def fetch_finviz_news(ticker):
+    """Fetches news from Finviz quote page."""
+    url = f"https://finviz.com/quote.ashx?t={quote_plus(ticker.upper())}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # News is usually in a table with id "news-table"
+        news_table = soup.find("table", id="news-table")
+        if not news_table:
+            return []
+            
+        rows = news_table.find_all("tr")
+        results = []
+        for row in rows:
+            try:
+                # Format: Date/Time | Headline (Link)
+                cols = row.find_all("td")
+                if len(cols) < 2:
+                    continue
+                
+                date_str = cols[0].text.strip()
+                link_tag = cols[1].find("a")
+                headline = link_tag.text.strip()
+                link = link_tag["href"]
+                
+                results.append({
+                    "date": date_str,
+                    "headline": headline,
+                    "link": link
+                })
+                if len(results) >= 5:
+                    break
+            except Exception:
+                continue
+        return results
+    except Exception as e:
+        logging.error(f"Error fetching news for {ticker}: {e}")
+        return []
+
+def fetch_finviz_insider(ticker):
+    """Fetches insider trading from Finviz quote page."""
+    url = f"https://finviz.com/quote.ashx?t={quote_plus(ticker.upper())}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Insider trading is usually in a table class "body-table" (there are many), 
+        # but it's typically the one after the news or financial statements.
+        # A better way is to look for the header "Insider Trading"
+        
+        # Finviz structure for insider is complex. Let's look for a table that contains "Relationship" or "Transaction"
+        tables = soup.find_all("table", class_="body-table")
+        insider_table = None
+        for table in tables:
+            headers_row = table.find("tr")
+            if headers_row and "Relationship" in headers_row.text and "Transaction" in headers_row.text:
+                insider_table = table
+                break
+        
+        if not insider_table:
+            return []
+            
+        rows = insider_table.find_all("tr")[1:] # Skip header
+        results = []
+        for row in rows:
+            try:
+                cols = row.find_all("td")
+                if len(cols) < 5:
+                    continue
+                
+                # Columns: Owner, Relationship, Date, Transaction, Cost, #Shares, Value, #Shares Total, SEC Form 4
+                owner = cols[0].text.strip()
+                relationship = cols[1].text.strip()
+                date = cols[2].text.strip()
+                transaction = cols[3].text.strip()
+                # cost = cols[4].text.strip()
+                shares = cols[5].text.strip()
+                
+                results.append({
+                    "owner": owner,
+                    "relationship": relationship,
+                    "date": date,
+                    "transaction": transaction,
+                    "shares": shares
+                })
+                if len(results) >= 5:
+                    break
+            except Exception:
+                continue
+        return results
+    except Exception as e:
+        logging.error(f"Error fetching insider for {ticker}: {e}")
+        return []
+
 async def post_init(application: Application):
     """Выполняется после инициализации приложения, но до начала polling"""
     logging.info("Запуск обновления статистики группы при старте...")
@@ -2009,10 +2252,383 @@ async def post_init(application: Application):
     await update_group_stats()
     logging.info("Статистика группы обновлена.")
 
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик inline-запросов"""
+    query = update.inline_query.query.strip().upper()
+    user_id = update.inline_query.from_user.id
+
+    if user_id not in TRUSTED_USERS:
+        return
+
+    results = []
+
+    # 1. Если запрос пустой - показываем общие опции
+    if not query:
+        # Портфель
+        port_text, _ = get_portfolio_text_and_keyboard(user_id)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="💼 Мой портфель",
+                description="Отправить сводку портфеля",
+                input_message_content=InputTextMessageContent(
+                    message_text=port_text,
+                    parse_mode=ParseMode.HTML
+                )
+            )
+        )
+        
+        # Группа
+        data = group_stats_cache.get("data", {})
+        if data:
+            total_invested = data.get("total_invested", 0.0)
+            total_current = data.get("total_current", 0.0)
+            total_profit = total_current - total_invested
+            pct = (total_profit / total_invested * 100) if total_invested else 0
+            
+            group_text = (f"👥 <b>Инвестиции группы</b>\n"
+                          f"Вложено: {total_invested:.0f} USD\n"
+                          f"Сейчас: {total_current:.0f} USD\n"
+                          f"Прибыль: {total_profit:+.0f} USD ({pct:+.1f}%)")
+            
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="👥 Инвестиции группы",
+                    description=f"Total: {total_current:.0f}$ ({pct:+.1f}%)",
+                    input_message_content=InputTextMessageContent(
+                        message_text=group_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                )
+            )
+            
+        results.append(
+             InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="🔍 Поиск котировок",
+                description="Введите тикер (например, AAPL)",
+                input_message_content=InputTextMessageContent(
+                    message_text="Чтобы найти котировку, введите @botname TICKER"
+                )
+            )
+        )
+    
+    # 2. Обработка специальных команд
+    elif query == "PORTFOLIO" or query == "ПОРТФЕЛЬ":
+        text, _ = get_portfolio_text_and_keyboard(user_id)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="💼 Мой портфель",
+                description="Текущее состояние портфеля",
+                input_message_content=InputTextMessageContent(
+                    message_text=text,
+                    parse_mode=ParseMode.HTML
+                )
+            )
+        )
+
+    elif query == "GROUP" or query == "ГРУППА":
+        # Генерируем текст группы (упрощенно, без кэша update если он стар, но мы берем из кэша)
+        data = group_stats_cache.get("data", {})
+        if data:
+            total_invested = data.get("total_invested", 0.0)
+            total_current = data.get("total_current", 0.0)
+            total_profit = total_current - total_invested
+            pct = (total_profit / total_invested * 100) if total_invested else 0
+            
+            text = (f"👥 <b>Инвестиции группы</b>\n"
+                    f"Вложено: {total_invested:.0f} USD\n"
+                    f"Сейчас: {total_current:.0f} USD\n"
+                    f"Прибыль: {total_profit:+.0f} USD ({pct:+.1f}%)")
+            
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="👥 Инвестиции группы",
+                    description=f"Total: {total_current:.0f}$ ({pct:+.1f}%)",
+                    input_message_content=InputTextMessageContent(
+                        message_text=text,
+                        parse_mode=ParseMode.HTML
+                    )
+                )
+            )
+
+    # 3. Поиск тикера (если длина < 6 и это буквы)
+    elif len(query) < 6 and query.isalpha():
+        ticker = query
+        try:
+            # Пытаемся получить данные
+            stock = yf.Ticker(ticker)
+            fi = getattr(stock, "fast_info", {})
+            price = fi.get("last_price")
+            
+            if price:
+                # Получаем имя
+                name = get_company_name(ticker)
+                
+                # Формируем текст
+                text = f"ℹ️ <b>{name} ({ticker})</b>\n"
+                text += f"💵 Цена: {price:.2f} USD\n"
+                
+                # Можно добавить изменение за день если есть
+                try:
+                    prev_close = fi.get("previous_close")
+                    if prev_close:
+                        change = price - prev_close
+                        pct = (change / prev_close) * 100
+                        emoji = "🟢" if change >= 0 else "🔴"
+                        text += f"Изменение: {emoji} {change:+.2f} ({pct:+.2f}%)"
+                except:
+                    pass
+
+                results.append(
+                    InlineQueryResultArticle(
+                        id=str(uuid4()),
+                        title=f"{ticker} - {price:.2f} USD",
+                        description=f"{name}",
+                        input_message_content=InputTextMessageContent(
+                            message_text=text,
+                            parse_mode=ParseMode.HTML
+                        )
+                    )
+                )
+        except Exception:
+            pass
+
+    await update.inline_query.answer(results, cache_time=10) # cache_time=0 for debug
+
+async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    text, _ = get_portfolio_text_and_keyboard(user_id)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def cmd_investisions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    # Используем кэш
+    if not group_stats_cache:
+        await update.message.reply_text("⏳ Обновляю данные группы, подождите...")
+        await update_group_stats()
+        
+    data = group_stats_cache.get("data", {})
+    if not data:
+         await update.message.reply_text("Инвестиции группы пока пусты.")
+         return
+
+    lines = ["👥 <b>Инвестиции группы</b>", ""]
+    
+    sector_data = data.get("sectors", {})
+    sorted_sectors = sorted(sector_data.keys())
+    
+    total_invested_all = data.get("total_invested", 0.0)
+    total_current_all = data.get("total_current", 0.0)
+    total_extra_all = data.get("total_extra", 0.0)
+    
+    for sec in sorted_sectors:
+        lines.append(f"🏷 <b>{sec}</b>")
+        sec_items = sector_data[sec]
+        sec_invested = 0.0
+        sec_current = 0.0
+        
+        for item in sec_items:
+            lines.append(f"• {item['ticker']} - {item['user']} - влож: {item['invested']:.0f}$ - сейчас: {item['current']:.0f}$ ({item['profit_abs']:+.0f}$ / {item['profit_pct']:+.1f}%)")
+            sec_invested += item['invested']
+            sec_current += item['current']
+        
+        sec_profit = sec_current - sec_invested
+        sec_pct = (sec_profit / sec_invested * 100.0) if sec_invested > 0 else 0.0
+        lines.append(f"<i>Total {sec}: {sec_invested:.0f}$ -> {sec_current:.0f}$ ({sec_profit:+.0f}$ / {sec_pct:+.1f}%)</i>")
+        lines.append("")
+
+    if total_extra_all != 0:
+         lines.append(f"💵 <b>Выведенные из активов (все): {total_extra_all:.0f}$</b>")
+
+    total_profit_all = (total_current_all - total_invested_all) + total_extra_all
+    total_pct_all = (total_profit_all / total_invested_all * 100.0) if total_invested_all > 0 else 0.0
+    
+    lines.append(f"<b>TOTAL ALL: {total_invested_all:.0f}$ -> {total_current_all:.0f}$ ({total_profit_all:+.0f}$ / {total_pct_all:+.1f}%)</b>")
+    
+    upd_ts = group_stats_cache.get("last_update")
+    if upd_ts:
+         dt = get_msk_time_str(upd_ts)
+         lines.append(f"\n🕒 Обновлено: {dt} (MSK)")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /ticker <TICKER>")
+        return
+    
+    ticker = context.args[0].upper()
+    try:
+        text = build_ticker_info_text(ticker, user_id)
+        photo_url = get_finviz_chart_url(ticker)
+        await update.message.reply_photo(
+            photo=photo_url,
+            caption=text,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def cmd_hotmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    # Finviz map is dynamic, so we send the Sector Performance image as a proxy
+    # and a link to the map.
+    
+    image_url = "https://finviz.com/grp_image.ashx?bar_sector_t.png"
+    map_url = "https://finviz.com/map.ashx"
+    
+    temp_file = None
+    try:
+        # Download image
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        }
+        resp = requests.get(image_url, headers=headers, timeout=10)
+        if resp.status_code == 200 and resp.content and len(resp.content) > 0:
+            # Use absolute path for temp file
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, f"temp_map_{uuid4()}.png")
+            
+            with open(temp_file, "wb") as f:
+                f.write(resp.content)
+            
+            # Verify file was written
+            if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
+                caption = f"📊 <b>Карта рынка (Sectors)</b>\n\n<a href='{map_url}'>🔗 Открыть интерактивную карту Finviz</a>"
+                
+                with open(temp_file, "rb") as f:
+                    await update.message.reply_photo(photo=f, caption=caption, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_text(f"❌ Не удалось сохранить изображение. <a href='{map_url}'>Ссылка</a>", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(f"❌ Не удалось загрузить карту (код: {resp.status_code}). <a href='{map_url}'>Ссылка</a>", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+    finally:
+        # Delete file in finally block to ensure cleanup
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+
+async def cmd_top_gainers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    await update.message.reply_text("⏳ Загружаю Top Gainers...")
+    data = fetch_finviz_screener("ta_topgainers")
+    if not data:
+        await update.message.reply_text("❌ Не удалось получить данные.")
+        return
+        
+    lines = ["🚀 <b>Top Gainers (Today)</b>", ""]
+    for item in data:
+        lines.append(f"• <b>{item['ticker']}</b>: {item['price']} ({item['change']})")
+    
+    lines.append(f"\n<a href='https://finviz.com/screener.ashx?v=110&s=ta_topgainers'>🔗 Finviz Screener</a>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def cmd_top_losers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    await update.message.reply_text("⏳ Загружаю Top Losers...")
+    data = fetch_finviz_screener("ta_toplosers")
+    if not data:
+        await update.message.reply_text("❌ Не удалось получить данные.")
+        return
+        
+    lines = ["🔻 <b>Top Losers (Today)</b>", ""]
+    for item in data:
+        lines.append(f"• <b>{item['ticker']}</b>: {item['price']} ({item['change']})")
+    
+    lines.append(f"\n<a href='https://finviz.com/screener.ashx?v=110&s=ta_toplosers'>🔗 Finviz Screener</a>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /news <TICKER>")
+        return
+    
+    ticker = context.args[0].upper()
+    await update.message.reply_text(f"⏳ Ищу новости для {ticker}...")
+    
+    news = fetch_finviz_news(ticker)
+    if not news:
+        await update.message.reply_text(f"❌ Новости для {ticker} не найдены.")
+        return
+        
+    lines = [f"📰 <b>Новости {ticker}</b>", ""]
+    for item in news:
+        lines.append(f"• {item['date']} - <a href='{item['link']}'>{item['headline']}</a>")
+        
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def cmd_insider(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /insider <TICKER>")
+        return
+    
+    ticker = context.args[0].upper()
+    await update.message.reply_text(f"⏳ Проверяю инсайдеров для {ticker}...")
+    
+    data = fetch_finviz_insider(ticker)
+    if not data:
+        await update.message.reply_text(f"❌ Инсайдерские сделки для {ticker} не найдены.")
+        return
+        
+    lines = [f"🕵️ <b>Инсайдеры {ticker}</b>", ""]
+    for item in data:
+        # Emoji based on transaction type
+        emoji = "🛒" if "Buy" in item['transaction'] else "💸" if "Sale" in item['transaction'] else "📝"
+        lines.append(f"{emoji} <b>{item['date']}</b>: {item['owner']} ({item['relationship']})")
+        lines.append(f"   {item['transaction']} {item['shares']} shares")
+        lines.append("")
+        
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    app.add_handler(CommandHandler("investisions", cmd_investisions))
+    app.add_handler(CommandHandler("ticker", cmd_ticker))
+    #app.add_handler(CommandHandler("hotmap", cmd_hotmap))
+    app.add_handler(CommandHandler("top_gainers", cmd_top_gainers))
+    app.add_handler(CommandHandler("top_losers", cmd_top_losers))
+    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("insider", cmd_insider))
+    
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.run_polling(drop_pending_updates=True)
 
