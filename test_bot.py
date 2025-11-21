@@ -158,12 +158,13 @@ def fetch_finviz_insights(ticker: str) -> list:
 def get_msk_time_str(ts=None):
     """Возвращает строку времени в MSK (UTC+3)"""
     if ts is None:
-        ts = datetime.now(timezone.utc)
-    elif isinstance(ts, (int, float)):
-        ts = datetime.fromtimestamp(ts, tz=timezone.utc)
+        ts = time.time()
+    elif isinstance(ts, datetime):
+        ts = ts.timestamp()
     
-    ts_msk = ts.astimezone(ZoneInfo("Europe/Moscow"))
-    return ts_msk.strftime('%d.%m.%Y %H:%M')
+    # Direct conversion from timestamp to MSK datetime
+    dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Europe/Moscow"))
+    return dt.strftime('%d.%m.%Y %H:%M')
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить актив", callback_data="add_asset"),
@@ -183,7 +184,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in TRUSTED_USERS:
         await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
         return
-    await update.message.reply_text(f"👋 Привет, {update.effective_user.first_name}! \n\n🤖 Я бот для трекинга инвестиций.\nВыберите действие в меню ниже:", reply_markup=main_menu())
+    
+    name = get_user_name(user_id)
+    text = (f"👋 Привет, {name}!\n\n"
+            "Я разработан... Да впринципе Вам пофигу, Кем. А в остальном, желаю удачи и приятного использования")
+    
+    keyboard = [[InlineKeyboardButton("главное меню", callback_data="show_main_menu")]]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_assets_menu(query, user_id, page=0):
     assets = user_assets.get(user_id, [])
@@ -640,7 +647,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⛔ Нет доступа.")
         return
 
-    if query.data == "add_asset":
+    elif query.data == "show_main_menu":
+        await query.edit_message_text("Главное меню:", reply_markup=main_menu())
+
+    elif query.data == "add_asset":
         user_states[user_id] = "waiting_for_asset"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
         await query.edit_message_text("Введите тикер актива (например, AAPL):",
