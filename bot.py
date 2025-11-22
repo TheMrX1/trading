@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InlineQueryResultArticle, InputTextMessageContent
+    InlineQueryResultArticle, InputTextMessageContent, WebAppInfo
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -122,6 +122,57 @@ def format_source(url: str) -> str:
     return f"<b><i><a href=\"{safe_url}\">источник</a></i></b>"
 
 
+def map_to_tradingview(ticker: str) -> str:
+    """Maps Yahoo Finance tickers to TradingView tickers."""
+    ticker = ticker.upper()
+    
+    # Crypto (e.g., BTC-USD -> BINANCE:BTCUSD)
+    if ticker.endswith("-USD"):
+        # Remove -USD and add BINANCE: prefix (common for major cryptos)
+        # TradingView usually resolves BTCUSD to a major exchange, but BINANCE is a safe default for crypto
+        clean_ticker = ticker.replace("-USD", "USD")
+        return f"BINANCE:{clean_ticker}"
+    
+    # Forex (e.g., EURUSD=X -> FX:EURUSD)
+    if ticker.endswith("=X"):
+        clean_ticker = ticker.replace("=X", "")
+        return f"FX:{clean_ticker}"
+    
+    # MOEX (e.g., SBER.ME -> MOEX:SBER)
+    if ticker.endswith(".ME"):
+        clean_ticker = ticker.replace(".ME", "")
+        return f"MOEX:{clean_ticker}"
+        
+    # Default (US Stocks usually match, e.g., AAPL -> AAPL)
+    return ticker
+
+
+def map_to_tradingview(ticker: str) -> str:
+    """Maps Yahoo Finance tickers to TradingView tickers."""
+    ticker = ticker.upper()
+    
+    # Crypto (e.g., BTC-USD -> BINANCE:BTCUSD)
+    if ticker.endswith("-USD"):
+        # Remove -USD and add BINANCE: prefix (common for major cryptos)
+        # TradingView usually resolves BTCUSD to a major exchange, but BINANCE is a safe default for crypto
+        clean_ticker = ticker.replace("-USD", "USD")
+        return f"BINANCE:{clean_ticker}"
+    
+    # Forex (e.g., EURUSD=X -> FX:EURUSD)
+    if ticker.endswith("=X"):
+        clean_ticker = ticker.replace("=X", "")
+        return f"FX:{clean_ticker}"
+    
+    # MOEX (e.g., SBER.ME -> MOEX:SBER)
+    if ticker.endswith(".ME"):
+        clean_ticker = ticker.replace(".ME", "")
+        return f"MOEX:{clean_ticker}"
+        
+    # Default (US Stocks usually match, e.g., AAPL -> AAPL)
+    # Some indices might need mapping (e.g., ^GSPC -> SP:SPX), but let's stick to basics first
+    return ticker
+
+
 def fetch_finviz_insights(ticker: str) -> list:
     """Attempt to extract AI-summarized insight from finviz quote page.
     Returns at most one main summary plus optional secondary sentences.
@@ -181,6 +232,26 @@ def main_menu():
     ]
     keyboard.append([InlineKeyboardButton("🏷 Сектор актива", callback_data="sectors"),
                      InlineKeyboardButton("ℹ️ Информация по тикеру", callback_data="ticker_info")])
+    keyboard.append([InlineKeyboardButton("⚙️ Настройки", callback_data="settings")])
+    return InlineKeyboardMarkup(keyboard)
+
+def settings_menu():
+    keyboard = [
+        [InlineKeyboardButton("📊 Тип графика", callback_data="chart_settings")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="show_main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def chart_settings_menu(user_id):
+    current_setting = user_settings.get(user_id, {}).get("chart_type", "static")
+    static_text = "✅ Статический (Картинка)" if current_setting == "static" else "Статический (Картинка)"
+    dynamic_text = "✅ Динамический (Widget)" if current_setting == "dynamic" else "Динамический (Widget)"
+    
+    keyboard = [
+        [InlineKeyboardButton(static_text, callback_data="set_chart_static")],
+        [InlineKeyboardButton(dynamic_text, callback_data="set_chart_dynamic")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -736,6 +807,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "show_main_menu":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
 
+    elif query.data == "settings":
+        await query.edit_message_text("⚙️ Настройки:", reply_markup=settings_menu())
+
+    elif query.data == "chart_settings":
+        await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
+
+    elif query.data == "set_chart_static":
+        user_settings.setdefault(user_id, {})["chart_type"] = "static"
+        await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
+
+    elif query.data == "set_chart_dynamic":
+        user_settings.setdefault(user_id, {})["chart_type"] = "dynamic"
+        await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
+
     elif query.data == "add_asset":
         user_states[user_id] = "waiting_for_asset"
         keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back")]]
@@ -1008,21 +1093,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
-            photo_url = get_finviz_chart_url(ticker)
-            message = query.message
-            chat_id = message.chat_id if message else query.from_user.id
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_url,
-                caption=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            try:
-                if message:
-                    await message.delete()
-            except Exception:
-                pass
+            
+            chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
+            
+            if chart_type == "dynamic":
+                web_app_url = os.getenv("WEB_APP_BASE_URL")
+                if web_app_url:
+                    tv_ticker = map_to_tradingview(ticker)
+                    full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
+                    keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
+                    
+                    message = query.message
+                    chat_id = message.chat_id if message else query.from_user.id
+                    
+                    # Если было фото, удаляем его и шлем текст
+                    if message and message.photo:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    # Если был текст, редактируем
+                    elif message:
+                         await query.edit_message_text(
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                else:
+                     await query.answer("URL для Web App не настроен (WEB_APP_BASE_URL)", show_alert=True)
+                     # Fallback to static
+                     photo_url = get_finviz_chart_url(ticker)
+                     message = query.message
+                     chat_id = message.chat_id if message else query.from_user.id
+                     await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_url,
+                        caption=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                     try:
+                        if message:
+                            await message.delete()
+                     except Exception:
+                        pass
+            else:
+                # Static (default)
+                photo_url = get_finviz_chart_url(ticker)
+                message = query.message
+                chat_id = message.chat_id if message else query.from_user.id
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                try:
+                    if message:
+                        await message.delete()
+                except Exception:
+                    pass
             return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
@@ -1265,21 +1409,77 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
-            photo_url = get_finviz_chart_url(ticker)
-            message = query.message
-            chat_id = message.chat_id if message else query.from_user.id
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_url,
-                caption=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            try:
-                if message:
-                    await message.delete()
-            except Exception:
-                pass
+            
+            chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
+            
+            if chart_type == "dynamic":
+                web_app_url = os.getenv("WEB_APP_BASE_URL")
+                if web_app_url:
+                    tv_ticker = map_to_tradingview(ticker)
+                    full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
+                    keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
+                    
+                    message = query.message
+                    chat_id = message.chat_id if message else query.from_user.id
+                    
+                    if message and message.photo:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    elif message:
+                         await query.edit_message_text(
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                else:
+                     await query.answer("URL для Web App не настроен (WEB_APP_BASE_URL)", show_alert=True)
+                     # Fallback
+                     photo_url = get_finviz_chart_url(ticker)
+                     message = query.message
+                     chat_id = message.chat_id if message else query.from_user.id
+                     await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_url,
+                        caption=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                     try:
+                        if message:
+                            await message.delete()
+                     except Exception:
+                        pass
+            else:
+                photo_url = get_finviz_chart_url(ticker)
+                message = query.message
+                chat_id = message.chat_id if message else query.from_user.id
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                try:
+                    if message:
+                        await message.delete()
+                except Exception:
+                    pass
             return
         except Exception as e:
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
