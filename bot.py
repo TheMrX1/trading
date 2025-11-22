@@ -23,9 +23,9 @@ from telegram.ext import (
 from uuid import uuid4
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found in .env file")
+    raise ValueError("TEST_BOT_TOKEN not found in .env file")
 
 #TRUSTED_USERS = [1085064193, 7424028554]
 TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336, 5405897708]
@@ -2719,62 +2719,16 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = context.args[0].upper()
     try:
         text = build_ticker_info_text(ticker, user_id)
-    
-        # Клавиатура для тикера
-        keyboard = []
-        chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
-        advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
-        web_app_url = os.getenv("WEB_APP_BASE_URL")
+        photo_url = get_finviz_chart_url(ticker)
         
-        # Кнопка советов
-        advises_btn = None
-        if web_app_url:
-            tv_ticker = map_to_tradingview(ticker)
-            advises_url = f"{web_app_url}/advises.html?symbol={tv_ticker}&interval={advises_interval}"
-            advises_btn = InlineKeyboardButton("🧠 Советы", web_app=WebAppInfo(url=advises_url))
-
-        if chart_type == "dynamic":
-            if web_app_url:
-                tv_ticker = map_to_tradingview(ticker)
-                full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
-                row = [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))]
-                if advises_btn:
-                    row.append(advises_btn)
-                keyboard.append(row)
-                
-                await update.message.reply_text(
-                    text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                 # Fallback to static behavior (text with image preview)
-                 photo_url = get_finviz_chart_url(ticker)
-                 # Add invisible link for preview
-                 text_with_preview = f"<a href='{photo_url}'>&#8205;</a>{text}"
-                 
-                 if advises_btn:
-                    keyboard.append([advises_btn])
-                 
-                 await update.message.reply_text(
-                    text_with_preview,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
-                )
-        else:
-            # Static
-            photo_url = get_finviz_chart_url(ticker)
-            # Add invisible link for preview so it looks like a photo message
-            text_with_preview = f"<a href='{photo_url}'>&#8205;</a>{text}"
-            
-            if advises_btn:
-                keyboard.append([advises_btn])
-                
-            await update.message.reply_text(
-                text_with_preview,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
-            )
+        # Отправляем просто фото с описанием, без кнопок Web App
+        await update.message.reply_photo(
+            photo=photo_url,
+            caption=text,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
