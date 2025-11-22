@@ -238,6 +238,7 @@ def main_menu():
 def settings_menu():
     keyboard = [
         [InlineKeyboardButton("📊 Тип графика", callback_data="chart_settings")],
+        [InlineKeyboardButton("🧠 Советы (Таймфрейм)", callback_data="advises_settings")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="show_main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -250,6 +251,18 @@ def chart_settings_menu(user_id):
     keyboard = [
         [InlineKeyboardButton(static_text, callback_data="set_chart_static")],
         [InlineKeyboardButton(dynamic_text, callback_data="set_chart_dynamic")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def advises_settings_menu(user_id):
+    current_setting = user_settings.get(user_id, {}).get("advises_interval", "1M")
+    w1_text = "✅ 1 Неделя" if current_setting == "1W" else "1 Неделя"
+    m1_text = "✅ 1 Месяц" if current_setting == "1M" else "1 Месяц"
+    
+    keyboard = [
+        [InlineKeyboardButton(w1_text, callback_data="set_advises_1W")],
+        [InlineKeyboardButton(m1_text, callback_data="set_advises_1M")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -609,11 +622,7 @@ def build_info_text(ticker, user_id=None):
     ts_msk_str = get_msk_time_str(ts)
     info.append(f"🕒 Последнее обновление (MSK): {ts_msk_str}")
     info.append(f"💵 Цена: {price} USD")
-    recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
-    if recommendation_key:
-        info.append(f"совет: {recommendation_key}")
-    elif rec_source:
-        info.append("совет: данные недоступны")
+    # Советы удалены из текста, теперь кнопка
     info.append(f"📊 Объём (последняя свеча {settings['analysis_days']}d/{settings['cycle_tf']}): {volume}")
     
     cycle_periods = [
@@ -709,12 +718,7 @@ def build_ticker_info_text(ticker, user_id=None):
     else:
         info.append("💵 Цена: данные недоступны")
     
-    # Совет от трейдеров
-    recommendation_key, recommendation_mean, num_analysts, distribution, rec_source = fetch_analyst_recommendation(ticker)
-    if recommendation_key:
-        info.append(f"🎯 Совет: {recommendation_key}")
-    elif rec_source:
-        info.append("🎯 Совет: данные недоступны")
+    # Советы удалены из текста, теперь кнопка
     
     # Стадии цикла
     cycle_periods = [
@@ -820,6 +824,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "set_chart_dynamic":
         user_settings.setdefault(user_id, {})["chart_type"] = "dynamic"
         await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
+
+    elif query.data == "advises_settings":
+        await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
+
+    elif query.data == "set_advises_1W":
+        user_settings.setdefault(user_id, {})["advises_interval"] = "1W"
+        await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
+
+    elif query.data == "set_advises_1M":
+        user_settings.setdefault(user_id, {})["advises_interval"] = "1M"
+        await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
 
     elif query.data == "add_asset":
         user_states[user_id] = "waiting_for_asset"
@@ -1095,13 +1110,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
             
             chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
+            advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
+            web_app_url = os.getenv("WEB_APP_BASE_URL")
             
+            # Кнопка советов
+            advises_btn = None
+            if web_app_url:
+                tv_ticker = map_to_tradingview(ticker)
+                advises_url = f"{web_app_url}/advises.html?symbol={tv_ticker}&interval={advises_interval}"
+                advises_btn = InlineKeyboardButton("🧠 Советы", web_app=WebAppInfo(url=advises_url))
+
             if chart_type == "dynamic":
-                web_app_url = os.getenv("WEB_APP_BASE_URL")
                 if web_app_url:
                     tv_ticker = map_to_tradingview(ticker)
                     full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
-                    keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
+                    row = [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))]
+                    if advises_btn:
+                        row.append(advises_btn)
+                    keyboard.insert(0, row)
                     
                     message = query.message
                     chat_id = message.chat_id if message else query.from_user.id
@@ -1155,6 +1181,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_url = get_finviz_chart_url(ticker)
                 message = query.message
                 chat_id = message.chat_id if message else query.from_user.id
+                
+                # Для статики кнопку советов добавляем в клавиатуру
+                if advises_btn:
+                    keyboard.insert(0, [advises_btn])
+                
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo_url,
@@ -1411,13 +1442,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
             
             chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
+            advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
+            web_app_url = os.getenv("WEB_APP_BASE_URL")
             
+            # Кнопка советов
+            advises_btn = None
+            if web_app_url:
+                tv_ticker = map_to_tradingview(ticker)
+                advises_url = f"{web_app_url}/advises.html?symbol={tv_ticker}&interval={advises_interval}"
+                advises_btn = InlineKeyboardButton("🧠 Советы", web_app=WebAppInfo(url=advises_url))
+
             if chart_type == "dynamic":
-                web_app_url = os.getenv("WEB_APP_BASE_URL")
                 if web_app_url:
                     tv_ticker = map_to_tradingview(ticker)
                     full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
-                    keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
+                    row = [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))]
+                    if advises_btn:
+                        row.append(advises_btn)
+                    keyboard.insert(0, row)
                     
                     message = query.message
                     chat_id = message.chat_id if message else query.from_user.id
@@ -1468,6 +1510,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_url = get_finviz_chart_url(ticker)
                 message = query.message
                 chat_id = message.chat_id if message else query.from_user.id
+                
+                if advises_btn:
+                    keyboard.insert(0, [advises_btn])
+                    
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo_url,
@@ -2673,12 +2719,54 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = context.args[0].upper()
     try:
         text = build_ticker_info_text(ticker, user_id)
-        photo_url = get_finviz_chart_url(ticker)
-        await update.message.reply_photo(
-            photo=photo_url,
-            caption=text,
-            parse_mode=ParseMode.HTML
-        )
+    
+        # Клавиатура для тикера
+        keyboard = []
+        chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
+        advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
+        web_app_url = os.getenv("WEB_APP_BASE_URL")
+        
+        # Кнопка советов
+        advises_btn = None
+        if web_app_url:
+            tv_ticker = map_to_tradingview(ticker)
+            advises_url = f"{web_app_url}/advises.html?symbol={tv_ticker}&interval={advises_interval}"
+            advises_btn = InlineKeyboardButton("🧠 Советы", web_app=WebAppInfo(url=advises_url))
+
+        if chart_type == "dynamic":
+            if web_app_url:
+                tv_ticker = map_to_tradingview(ticker)
+                full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
+                row = [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))]
+                if advises_btn:
+                    row.append(advises_btn)
+                keyboard.append(row)
+                
+                await update.message.reply_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                 # Fallback
+                 photo_url = get_finviz_chart_url(ticker)
+                 await update.message.reply_photo(
+                    photo=photo_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML
+                )
+        else:
+            # Static
+            photo_url = get_finviz_chart_url(ticker)
+            if advises_btn:
+                keyboard.append([advises_btn])
+                
+            await update.message.reply_photo(
+                photo=photo_url,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+            )
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
