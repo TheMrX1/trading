@@ -122,6 +122,57 @@ def format_source(url: str) -> str:
     return f"<b><i><a href=\"{safe_url}\">источник</a></i></b>"
 
 
+def map_to_tradingview(ticker: str) -> str:
+    """Maps Yahoo Finance tickers to TradingView tickers."""
+    ticker = ticker.upper()
+    
+    # Crypto (e.g., BTC-USD -> BINANCE:BTCUSD)
+    if ticker.endswith("-USD"):
+        # Remove -USD and add BINANCE: prefix (common for major cryptos)
+        # TradingView usually resolves BTCUSD to a major exchange, but BINANCE is a safe default for crypto
+        clean_ticker = ticker.replace("-USD", "USD")
+        return f"BINANCE:{clean_ticker}"
+    
+    # Forex (e.g., EURUSD=X -> FX:EURUSD)
+    if ticker.endswith("=X"):
+        clean_ticker = ticker.replace("=X", "")
+        return f"FX:{clean_ticker}"
+    
+    # MOEX (e.g., SBER.ME -> MOEX:SBER)
+    if ticker.endswith(".ME"):
+        clean_ticker = ticker.replace(".ME", "")
+        return f"MOEX:{clean_ticker}"
+        
+    # Default (US Stocks usually match, e.g., AAPL -> AAPL)
+    return ticker
+
+
+def map_to_tradingview(ticker: str) -> str:
+    """Maps Yahoo Finance tickers to TradingView tickers."""
+    ticker = ticker.upper()
+    
+    # Crypto (e.g., BTC-USD -> BINANCE:BTCUSD)
+    if ticker.endswith("-USD"):
+        # Remove -USD and add BINANCE: prefix (common for major cryptos)
+        # TradingView usually resolves BTCUSD to a major exchange, but BINANCE is a safe default for crypto
+        clean_ticker = ticker.replace("-USD", "USD")
+        return f"BINANCE:{clean_ticker}"
+    
+    # Forex (e.g., EURUSD=X -> FX:EURUSD)
+    if ticker.endswith("=X"):
+        clean_ticker = ticker.replace("=X", "")
+        return f"FX:{clean_ticker}"
+    
+    # MOEX (e.g., SBER.ME -> MOEX:SBER)
+    if ticker.endswith(".ME"):
+        clean_ticker = ticker.replace(".ME", "")
+        return f"MOEX:{clean_ticker}"
+        
+    # Default (US Stocks usually match, e.g., AAPL -> AAPL)
+    # Some indices might need mapping (e.g., ^GSPC -> SP:SPX), but let's stick to basics first
+    return ticker
+
+
 def fetch_finviz_insights(ticker: str) -> list:
     """Attempt to extract AI-summarized insight from finviz quote page.
     Returns at most one main summary plus optional secondary sentences.
@@ -1048,7 +1099,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chart_type == "dynamic":
                 web_app_url = os.getenv("WEB_APP_BASE_URL")
                 if web_app_url:
-                    full_url = f"{web_app_url}/chart.html?symbol={ticker}"
+                    tv_ticker = map_to_tradingview(ticker)
+                    full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
                     keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
                     
                     message = query.message
@@ -1363,7 +1415,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chart_type == "dynamic":
                 web_app_url = os.getenv("WEB_APP_BASE_URL")
                 if web_app_url:
-                    full_url = f"{web_app_url}/chart.html?symbol={ticker}"
+                    tv_ticker = map_to_tradingview(ticker)
+                    full_url = f"{web_app_url}/chart.html?symbol={tv_ticker}"
                     keyboard.insert(0, [InlineKeyboardButton("📈 Открыть график", web_app=WebAppInfo(url=full_url))])
                     
                     message = query.message
