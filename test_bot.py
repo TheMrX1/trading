@@ -2748,22 +2748,42 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
-                 # Fallback
+                 # Fallback (Dynamic requested but no URL) -> Treat as Static
                  photo_url = get_finviz_chart_url(ticker)
                  await update.message.reply_photo(
                     photo=photo_url,
-                    caption=text,
                     parse_mode=ParseMode.HTML
                 )
+                 # Send buttons in separate message
+                 if advises_btn:
+                    keyboard.append([advises_btn])
+                 
+                 if keyboard:
+                     await update.message.reply_text(
+                        text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                 else:
+                     await update.message.reply_text(
+                        text,
+                        parse_mode=ParseMode.HTML
+                    )
         else:
             # Static
             photo_url = get_finviz_chart_url(ticker)
+            # 1. Send Photo (Chart) - No Web App buttons allowed here in groups
+            await update.message.reply_photo(
+                photo=photo_url,
+                parse_mode=ParseMode.HTML
+            )
+            
+            # 2. Send Text (Info) with Buttons
             if advises_btn:
                 keyboard.append([advises_btn])
                 
-            await update.message.reply_photo(
-                photo=photo_url,
-                caption=text,
+            await update.message.reply_text(
+                text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
