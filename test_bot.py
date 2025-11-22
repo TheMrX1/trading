@@ -2013,14 +2013,6 @@ def save_user_data():
     """DEPRECATED: Data is now saved to DB immediately."""
     pass
 
-def load_blacklist():
-    """DEPRECATED: Blacklist is loaded via load_data_from_db."""
-    pass
-
-def save_blacklist():
-    """DEPRECATED: Blacklist is now saved to DB immediately."""
-    pass
-
 def load_group_cache():
     global group_stats_cache
     try:
@@ -2161,7 +2153,7 @@ async def notify_users_about_blacklist(context, ticker, added_by_user_id, commen
             except Exception as e:
                 logging.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
 
-load_blacklist()
+
 
 def calculate_pe_ratio(ticker):
     stock = yf.Ticker(ticker)
