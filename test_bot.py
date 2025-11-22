@@ -2525,6 +2525,9 @@ def fetch_finviz_insider(ticker):
 
 async def post_init(application: Application):
     """Выполняется после инициализации приложения, но до начала polling"""
+    logging.info("Загрузка данных из БД...")
+    load_data_from_db()
+    
     logging.info("Запуск обновления статистики группы при старте...")
     # Запускаем обновление в фоне (или ждем завершения, если критично)
     # Лучше подождать, чтобы данные были готовы сразу
@@ -2898,6 +2901,43 @@ async def cmd_insider(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
+async def cmd_debug_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug command to check DB status"""
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+
+    lines = [f"🛠 <b>DB Debug Info</b>", ""]
+    lines.append(f"DB Path: <code>{DB_NAME}</code>")
+    
+    if os.path.exists(DB_NAME):
+        lines.append("✅ DB file exists.")
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM users")
+            users_count = cursor.fetchone()[0]
+            lines.append(f"Users in DB: {users_count}")
+            
+            cursor.execute("SELECT COUNT(*) FROM assets")
+            assets_count = cursor.fetchone()[0]
+            lines.append(f"Assets in DB: {assets_count}")
+            
+            conn.close()
+        except Exception as e:
+            lines.append(f"❌ DB Connection Error: {e}")
+    else:
+        lines.append("❌ DB file NOT found!")
+        
+    lines.append("")
+    lines.append(f"<b>In-Memory Cache:</b>")
+    lines.append(f"Users with assets: {len(user_assets_cache)}")
+    lines.append(f"Portfolios: {len(user_portfolio_cache)}")
+    lines.append(f"Blacklist: {len(blacklist_cache)}")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
@@ -2909,6 +2949,7 @@ def main():
     app.add_handler(CommandHandler("top_losers", cmd_top_losers))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("insider", cmd_insider))
+    app.add_handler(CommandHandler("debug_db", cmd_debug_db))
     
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(InlineQueryHandler(inline_query_handler))
