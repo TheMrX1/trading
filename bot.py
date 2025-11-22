@@ -2748,22 +2748,30 @@ async def cmd_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
-                 # Fallback
+                 # Fallback to static behavior (text with image preview)
                  photo_url = get_finviz_chart_url(ticker)
-                 await update.message.reply_photo(
-                    photo=photo_url,
-                    caption=text,
-                    parse_mode=ParseMode.HTML
+                 # Add invisible link for preview
+                 text_with_preview = f"<a href='{photo_url}'>&#8205;</a>{text}"
+                 
+                 if advises_btn:
+                    keyboard.append([advises_btn])
+                 
+                 await update.message.reply_text(
+                    text_with_preview,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
                 )
         else:
             # Static
             photo_url = get_finviz_chart_url(ticker)
+            # Add invisible link for preview so it looks like a photo message
+            text_with_preview = f"<a href='{photo_url}'>&#8205;</a>{text}"
+            
             if advises_btn:
                 keyboard.append([advises_btn])
                 
-            await update.message.reply_photo(
-                photo=photo_url,
-                caption=text,
+            await update.message.reply_text(
+                text_with_preview,
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
