@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradingView Chart</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background-color: #131722;
+            /* Dark theme background match */
+        }
+
+        .tradingview-widget-container {
+            height: 100%;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- TradingView Widget BEGIN -->
+    <div class="tradingview-widget-container">
+        <div class="tradingview-widget-container__widget"></div>
+        <script type="text/javascript"
+            src="https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js" async>
+                {
+                    "symbol": "FX:EURUSD",
+                        "width": "100%",
+                            "height": "100%",
+                                "locale": "en",
+                                    "dateRange": "12M",
+                                        "colorTheme": "dark",
+                                            "isTransparent": false,
+                                                "autosize": true,
+                                                    "largeChartUrl": ""
+                }
+            </script>
+    </div>
+    <!-- TradingView Widget END -->
+
+    <script>
+        // Function to get query parameter by name
+        function getParameterByName(name, url = window.location.href) {
+            name = name.replace(/[\[\]]/g, '\\$&');
+            var regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+                results = regex.exec(url);
+            if (!results) return null;
+            if (!results[2]) return '';
+            return decodeURIComponent(results[2].replace(/\+/g, ' '));
+        }
+
+        // Get symbol from URL parameter, default to AAPL if not present
+        const symbol = getParameterByName('symbol') || 'AAPL';
+
+        // Update the widget configuration dynamically
+        // Note: The TradingView widget script executes immediately. 
+        // To make it dynamic, we need to inject the script with the correct symbol.
+
+        const container = document.querySelector('.tradingview-widget-container__widget');
+        // Remove the static script if it exists (though in this structure it's cleaner to just write it fresh)
+
+        // Clear existing content (if any)
+        document.querySelector('.tradingview-widget-container').innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+
+        const script = document.createElement('script');
+        script.type = 'text/javascript';
+        script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js';
+        script.async = true;
+        script.innerHTML = JSON.stringify({
+            "symbol": symbol,
+            "width": "100%",
+            "height": "100%",
+            "locale": "ru",
+            "dateRange": "12M",
+            "colorTheme": "dark",
+            "isTransparent": false,
+            "autosize": true,
+            "largeChartUrl": ""
+        });
+
+        document.querySelector('.tradingview-widget-container').appendChild(script);
+    </script>
+</body>
+
+</html>
