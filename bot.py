@@ -54,17 +54,247 @@ user_names_cache = {}
 
 blacklist = {}
 
+import sqlite3
+
 # Портфель
-user_portfolio = {}  # {user_id: {ticker: {"qty": int, "avg_price": float}}}
+# user_portfolio = {}  # DEPRECATED: Moved to DB
 
 # Временный контекст для сделок
 user_trade_context = {}
 
 # Дополнительные выведенные средства
-user_extra_funds = {}  # {user_id: float}
+# user_extra_funds = {}  # DEPRECATED: Moved to DB
 
 # Кэш статистики группы
 group_stats_cache = {}  # {"last_update": ts, "data": {...}}
+
+DB_NAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot_database.db")
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Initializes the database if it doesn't exist."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        ticker TEXT,
+        comment TEXT,
+        custom_name TEXT,
+        UNIQUE(user_id, ticker),
+        FOREIGN KEY(user_id) REFERENCES users(user_id)
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS portfolio (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        ticker TEXT,
+        quantity INTEGER,
+        avg_price REAL,
+        UNIQUE(user_id, ticker),
+        FOREIGN KEY(user_id) REFERENCES users(user_id)
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_settings (
+        user_id INTEGER PRIMARY KEY,
+        chart_type TEXT DEFAULT 'static',
+        advises_interval TEXT DEFAULT '1M',
+        extra_funds REAL DEFAULT 0.0,
+        FOREIGN KEY(user_id) REFERENCES users(user_id)
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS blacklist (
+        ticker TEXT PRIMARY KEY,
+        added_by_user_id INTEGER,
+        comment TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+# In-memory caches for performance (populated from DB on start)
+user_assets_cache = {}
+user_portfolio_cache = {}
+user_settings_cache = {}
+user_comments_cache = {}
+user_asset_names_cache = {}
+blacklist_cache = {}
+user_extra_funds_cache = {}
+
+def load_data_from_db():
+    """Loads data from DB into memory caches."""
+    global user_assets_cache, user_portfolio_cache, user_settings_cache
+    global user_comments_cache, user_asset_names_cache, blacklist_cache, user_extra_funds_cache
+    
+    init_db()
+    logging.info(f"Connecting to database at: {DB_NAME}")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Load Assets & Comments & Names
+    cursor.execute("SELECT user_id, ticker, comment, custom_name FROM assets")
+    rows = cursor.fetchall()
+    logging.info(f"Fetched {len(rows)} asset rows from DB.")
+    for row in rows:
+        uid = row["user_id"]
+        ticker = row["ticker"]
+        user_assets_cache.setdefault(uid, []).append(ticker)
+        if row["comment"]:
+            user_comments_cache.setdefault(uid, {})[ticker] = row["comment"]
+        if row["custom_name"]:
+            user_asset_names_cache.setdefault(uid, {})[ticker] = row["custom_name"]
+            
+    # Load Portfolio
+    cursor.execute("SELECT user_id, ticker, quantity, avg_price FROM portfolio")
+    rows = cursor.fetchall()
+    for row in rows:
+        uid = row["user_id"]
+        ticker = row["ticker"]
+        user_portfolio_cache.setdefault(uid, {})[ticker] = {
+            "qty": row["quantity"],
+            "avg_price": row["avg_price"]
+        }
+        
+    # Load Settings
+    cursor.execute("SELECT user_id, chart_type, advises_interval, extra_funds FROM user_settings")
+    rows = cursor.fetchall()
+    for row in rows:
+        uid = row["user_id"]
+        user_settings_cache[uid] = {
+            "chart_type": row["chart_type"],
+            "advises_interval": row["advises_interval"]
+        }
+        user_extra_funds_cache[uid] = row["extra_funds"]
+        
+    # Load Blacklist
+    cursor.execute("SELECT ticker, added_by_user_id, comment FROM blacklist")
+    rows = cursor.fetchall()
+    for row in rows:
+        blacklist_cache[row["ticker"]] = {
+            "user_id": row["added_by_user_id"],
+            "comment": row["comment"]
+        }
+        
+    conn.close()
+    logging.info(f"Loaded from DB: {len(user_assets_cache)} users with assets, {len(user_portfolio_cache)} portfolios, {len(blacklist_cache)} blacklist items.")
+
+def save_asset_to_db(user_id, ticker, comment="", custom_name=""):
+    conn = get_db_connection()
+    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.execute("""
+        INSERT OR REPLACE INTO assets (user_id, ticker, comment, custom_name)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, ticker, comment, custom_name))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    if ticker not in user_assets_cache.get(user_id, []):
+        user_assets_cache.setdefault(user_id, []).append(ticker)
+    if comment:
+        user_comments_cache.setdefault(user_id, {})[ticker] = comment
+    if custom_name:
+        user_asset_names_cache.setdefault(user_id, {})[ticker] = custom_name
+
+def delete_asset_from_db(user_id, ticker):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM assets WHERE user_id = ? AND ticker = ?", (user_id, ticker))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    if user_id in user_assets_cache and ticker in user_assets_cache[user_id]:
+        user_assets_cache[user_id].remove(ticker)
+    if user_id in user_comments_cache and ticker in user_comments_cache[user_id]:
+        del user_comments_cache[user_id][ticker]
+    if user_id in user_asset_names_cache and ticker in user_asset_names_cache[user_id]:
+        del user_asset_names_cache[user_id][ticker]
+
+def save_portfolio_to_db(user_id, ticker, qty, avg_price):
+    conn = get_db_connection()
+    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    if qty > 0:
+        conn.execute("""
+            INSERT OR REPLACE INTO portfolio (user_id, ticker, quantity, avg_price)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, ticker, qty, avg_price))
+    else:
+        conn.execute("DELETE FROM portfolio WHERE user_id = ? AND ticker = ?", (user_id, ticker))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    if qty > 0:
+        user_portfolio_cache.setdefault(user_id, {})[ticker] = {"qty": qty, "avg_price": avg_price}
+    else:
+        if user_id in user_portfolio_cache and ticker in user_portfolio_cache[user_id]:
+            del user_portfolio_cache[user_id][ticker]
+
+def save_settings_to_db(user_id, chart_type=None, advises_interval=None, extra_funds=None):
+    conn = get_db_connection()
+    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    
+    # Get current settings to merge
+    current = user_settings_cache.get(user_id, {"chart_type": "static", "advises_interval": "1M"})
+    current_extra = user_extra_funds_cache.get(user_id, 0.0)
+    
+    new_chart = chart_type if chart_type is not None else current.get("chart_type", "static")
+    new_interval = advises_interval if advises_interval is not None else current.get("advises_interval", "1M")
+    new_extra = extra_funds if extra_funds is not None else current_extra
+    
+    conn.execute("""
+        INSERT OR REPLACE INTO user_settings (user_id, chart_type, advises_interval, extra_funds)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, new_chart, new_interval, new_extra))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    user_settings_cache[user_id] = {"chart_type": new_chart, "advises_interval": new_interval}
+    user_extra_funds_cache[user_id] = new_extra
+
+def save_blacklist_to_db(ticker, user_id, comment):
+    conn = get_db_connection()
+    conn.execute("""
+        INSERT OR REPLACE INTO blacklist (ticker, added_by_user_id, comment)
+        VALUES (?, ?, ?)
+    """, (ticker, user_id, comment))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    blacklist_cache[ticker] = {"user_id": user_id, "comment": comment}
+
+def remove_blacklist_from_db(ticker):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM blacklist WHERE ticker = ?", (ticker,))
+    conn.commit()
+    conn.close()
+    
+    # Update cache
+    if ticker in blacklist_cache:
+        del blacklist_cache[ticker]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,13 +327,13 @@ def get_display_name(ticker, user_id=None):
     ticker = ticker.upper()
     company_name = None
     if user_id:
-        company_name = user_asset_names.get(user_id, {}).get(ticker)
+        company_name = user_asset_names_cache.get(user_id, {}).get(ticker)
     if not company_name:
         company_name = ticker_name_cache.get(ticker)
     if not company_name:
         company_name = get_company_name(ticker)
     if user_id:
-        user_asset_names.setdefault(user_id, {})[ticker] = company_name
+        user_asset_names_cache.setdefault(user_id, {})[ticker] = company_name
     ticker_name_cache[ticker] = company_name
     if company_name and company_name != ticker:
         return f"{company_name} ({ticker})"
@@ -244,7 +474,7 @@ def settings_menu():
     return InlineKeyboardMarkup(keyboard)
 
 def chart_settings_menu(user_id):
-    current_setting = user_settings.get(user_id, {}).get("chart_type", "static")
+    current_setting = user_settings_cache.get(user_id, {}).get("chart_type", "static")
     static_text = "✅ Статический (Картинка)" if current_setting == "static" else "Статический (Картинка)"
     dynamic_text = "✅ Динамический (Widget)" if current_setting == "dynamic" else "Динамический (Widget)"
     
@@ -256,7 +486,7 @@ def chart_settings_menu(user_id):
     return InlineKeyboardMarkup(keyboard)
 
 def advises_settings_menu(user_id):
-    current_setting = user_settings.get(user_id, {}).get("advises_interval", "1M")
+    current_setting = user_settings_cache.get(user_id, {}).get("advises_interval", "1M")
     w1_text = "✅ 1 Неделя" if current_setting == "1W" else "1 Неделя"
     m1_text = "✅ 1 Месяц" if current_setting == "1M" else "1 Месяц"
     
@@ -281,7 +511,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_assets_menu(query, user_id, page=0):
-    assets = user_assets.get(user_id, [])
+    assets = user_assets_cache.get(user_id, [])
     per_page = 5
     start = page * per_page
     end = start + per_page
@@ -304,7 +534,7 @@ async def show_assets_menu(query, user_id, page=0):
     await query.edit_message_text("📋 <b>Ваши активы:</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def get_portfolio_text_and_keyboard(user_id):
-    positions = user_portfolio.get(user_id, {})
+    positions = user_portfolio_cache.get(user_id, {})
     # Удаляем нулевые позиции из хранения
     tickers_to_delete = [t for t, p in positions.items() if p.get("qty", 0) <= 0]
     for t in tickers_to_delete:
@@ -313,11 +543,12 @@ def get_portfolio_text_and_keyboard(user_id):
         except Exception:
             pass
     lines = ["💼 <b>Мой портфель:</b>", ""]
+    total_change = 0.0
+    total_invested = 0.0
+    
     if not positions:
         lines.append("<i>Пока нет позиций.</i>")
     else:
-        total_change = 0.0
-        total_invested = 0.0
         for ticker, pos in positions.items():
             qty = pos.get("qty", 0)
             avg_price = pos.get("avg_price", 0.0)
@@ -348,7 +579,7 @@ def get_portfolio_text_and_keyboard(user_id):
             
     lines.append(f"💰 <b>Инвестировано:</b> {total_invested:.2f} USD")
     
-    extra = user_extra_funds.get(user_id, 0.0)
+    extra = user_extra_funds_cache.get(user_id, 0.0)
     if extra != 0:
         lines.append(f"💵 <b>Выведенные из активов:</b> {extra:.2f} USD")
     
@@ -613,7 +844,7 @@ def build_info_text(ticker, user_id=None):
     info = []
     company_name = None
     if user_id:
-        company_name = user_asset_names.get(user_id, {}).get(ticker)
+        company_name = user_asset_names_cache.get(user_id, {}).get(ticker)
     if not company_name:
         company_name = ticker_name_cache.get(ticker)
     if not company_name:
@@ -670,8 +901,8 @@ def build_info_text(ticker, user_id=None):
     else:
         info.append("🚀 Последняя крупная покупка: не обнаружена")
 
-    user_comment = user_comments.get(user_id, {}).get(ticker) if user_id else None
-    if user_id and ticker not in user_assets.get(user_id, []):
+    user_comment = user_comments_cache.get(user_id, {}).get(ticker) if user_id else None
+    if user_id and ticker not in user_assets_cache.get(user_id, []):
         info.append("💬 Комментарий: Вы не добавили этот актив в Ваши активы")
     elif user_comment:
         info.append(f"💬 Комментарий: {user_comment}")
@@ -703,7 +934,7 @@ def build_ticker_info_text(ticker, user_id=None):
     # Получаем название компании
     company_name = None
     if user_id:
-        company_name = user_asset_names.get(user_id, {}).get(ticker)
+        company_name = user_asset_names_cache.get(user_id, {}).get(ticker)
     if not company_name:
         company_name = ticker_name_cache.get(ticker)
     if not company_name:
@@ -818,22 +1049,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
 
     elif query.data == "set_chart_static":
-        user_settings.setdefault(user_id, {})["chart_type"] = "static"
+        save_settings_to_db(user_id, chart_type="static")
         await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
 
     elif query.data == "set_chart_dynamic":
-        user_settings.setdefault(user_id, {})["chart_type"] = "dynamic"
+        save_settings_to_db(user_id, chart_type="dynamic")
         await query.edit_message_text("Выберите тип графика:", reply_markup=chart_settings_menu(user_id))
 
     elif query.data == "advises_settings":
         await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
 
     elif query.data == "set_advises_1W":
-        user_settings.setdefault(user_id, {})["advises_interval"] = "1W"
+        save_settings_to_db(user_id, advises_interval="1W")
         await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
 
     elif query.data == "set_advises_1M":
-        user_settings.setdefault(user_id, {})["advises_interval"] = "1M"
+        save_settings_to_db(user_id, advises_interval="1M")
         await query.edit_message_text("Выберите таймфрейм для советов:", reply_markup=advises_settings_menu(user_id))
 
     elif query.data == "add_asset":
@@ -843,7 +1074,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "my_assets":
-        assets = user_assets.get(user_id, [])
+        assets = user_assets_cache.get(user_id, [])
         if not assets:
             await query.edit_message_text("У вас пока нет активов.", reply_markup=main_menu())
             return
@@ -918,9 +1149,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         has_assets = False
         for uid in TRUSTED_USERS:
-            assets = user_assets.get(uid, [])
+            assets = user_assets_cache.get(uid, [])
             # Также проверяем портфель, вдруг там есть позиции, но нет в списке наблюдения
-            portfolio = user_portfolio.get(uid, {})
+            portfolio = user_portfolio_cache.get(uid, {})
             has_portfolio = any(p.get("qty", 0) > 0 for p in portfolio.values())
             
             if assets or has_portfolio:
@@ -935,7 +1166,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выберите пользователя:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "insights":
-        assets = user_assets.get(user_id, [])
+        assets = user_assets_cache.get(user_id, [])
         if not assets:
             await query.edit_message_text("У вас нет активов для сбора инсайтов.", reply_markup=main_menu())
             return
@@ -965,9 +1196,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("group_user_assets_"):
         target_user_id = int(query.data.split("_", 3)[3])
-        assets = user_assets.get(target_user_id, [])
-        comments = user_comments.get(target_user_id, {})
-        names = user_asset_names.get(target_user_id, {})
+        assets = user_assets_cache.get(target_user_id, [])
+        comments = user_comments_cache.get(target_user_id, {})
+        names = user_asset_names_cache.get(target_user_id, {})
         u_name = get_user_name(target_user_id)
 
         if not assets:
@@ -978,7 +1209,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 company_name = names.get(asset)
                 if not company_name:
                     company_name = get_company_name(asset)
-                    user_asset_names.setdefault(target_user_id, {})[asset] = company_name
+                    user_asset_names_cache.setdefault(target_user_id, {})[asset] = company_name
                 ticker_name_cache[asset] = company_name
                 comment = comments.get(asset, "")
                 comment_part = f"\n💬 {comment}" if comment else ""
@@ -991,7 +1222,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("group_user_portfolio_"):
         target_user_id = int(query.data.split("_", 3)[3])
-        positions = user_portfolio.get(target_user_id, {})
+        positions = user_portfolio_cache.get(target_user_id, {})
         u_name = get_user_name(target_user_id)
         
         # Удаляем нулевые позиции
@@ -1013,7 +1244,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 avg_price = pos.get("avg_price", 0.0)
                 
                 # Получаем имя
-                name = user_asset_names.get(target_user_id, {}).get(ticker)
+                name = user_asset_names_cache.get(target_user_id, {}).get(ticker)
                 if not name:
                     name = get_company_name(ticker)
                 
@@ -1050,8 +1281,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "blacklist":
         blacklist_lines = ["🚫 Черный список:\n"]
-        if blacklist:
-            for ticker, data in blacklist.items():
+        if blacklist_cache:
+            for ticker, data in blacklist_cache.items():
                 user_name = get_user_name(data["user_id"])
                 blacklist_lines.append(f"• {ticker} (добавил: {user_name}) - {data['comment']}")
         else:
@@ -1078,7 +1309,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("asset_"):
         ticker = query.data.split("_", 1)[1]
-        comment = user_comments.get(user_id, {}).get(ticker, ticker)
+        comment = user_comments_cache.get(user_id, {}).get(ticker, ticker)
         display_name = get_display_name(ticker, user_id)
         user_trade_context.pop(user_id, None)
         keyboard = [
@@ -1109,8 +1340,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"asset_{ticker}")]]
             
-            chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
-            advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
+            chart_type = user_settings_cache.get(user_id, {}).get("chart_type", "static")
+            advises_interval = user_settings_cache.get(user_id, {}).get("advises_interval", "1M")
             web_app_url = os.getenv("WEB_APP_BASE_URL")
             
             # Кнопка советов
@@ -1205,19 +1436,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("delete_"):
         ticker = query.data.split("_", 1)[1]
-        if user_id in user_assets and ticker in user_assets[user_id]:
-            user_assets[user_id].remove(ticker)
-            if user_id in user_comments and ticker in user_comments[user_id]:
-                del user_comments[user_id][ticker]
-                if not user_comments[user_id]:
-                    del user_comments[user_id]
-            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
-                del user_asset_names[user_id][ticker]
-                if not user_asset_names[user_id]:
-                    del user_asset_names[user_id]
-            if not user_assets[user_id]:
-                del user_assets[user_id]
-            save_user_data()
+        if user_id in user_assets_cache and ticker in user_assets_cache[user_id]:
+            delete_asset_from_db(user_id, ticker)
+            # Обновляем кэш группы в фоне
             # Обновляем кэш группы в фоне
             context.application.create_task(update_group_stats())
             await query.edit_message_text(f"✅ Актив {ticker} успешно удален!", reply_markup=main_menu())
@@ -1249,10 +1470,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text += f"3-летний: {cagr_3y_value:.2f}%\n\n"
             message_text += f"{format_source(source_url)}\n"
             message_text += f"Формула: CAGR = (Конечная стоимость / Начальная стоимость)^(1/n) - 1"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете CAGR для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data.startswith("eps_"):
@@ -1261,10 +1482,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             eps_value, source_url = calculate_eps(ticker)
             message_text = f"📊 EPS для {display_name}: ${eps_value:.2f}\n\n{format_source(source_url)}"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете EPS для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data.startswith("beta_"):
@@ -1278,10 +1499,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text += f"3-летний (дневные данные): {beta_3y_value:.2f}\n\n"
             message_text += f"{format_source(source_url)}\n"
             message_text += f"Формула: β = Cov(Ri, Rm) / Var(Rm)"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете бета-коэффициента для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data.startswith("pe_"):
@@ -1290,10 +1511,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             pe_value, source_url = calculate_pe_ratio(ticker)
             message_text = f"📊 P/E Ratio для {display_name}: {pe_value:.2f}\n\n{format_source(source_url)}"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при получении P/E Ratio для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data.startswith("rvol_"):
@@ -1312,10 +1533,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text += f"Объём (последняя свеча 30d/1d): {int(last['Volume'])}\n"
             message_text += f"Средний объём: {int(avg_vol)}\n\n"
             message_text += f"{format_source(f'https://finance.yahoo.com/quote/{ticker}/key-statistics')}"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при расчете RVOL для {ticker}: {str(e)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data.startswith("target_"):
@@ -1337,10 +1558,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 diff = ((target_value - current_price) / current_price) * 100
                 diff_text = f"\nТекущая цена Yahoo: {current_price:.2f} USD ({diff:+.2f}% к таргету)"
             message_text = f"🎯 Консенсусная 12-месячная цель для {display_name}: {target_value:.2f} USD\n{format_source(source_url)}{diff_text}"
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
         except Exception as e:
-            back_cb = f"calc_{ticker}" if ticker in user_assets.get(user_id, []) else f"calcany_{ticker}"
+            back_cb = f"calc_{ticker}" if ticker in user_assets_cache.get(user_id, []) else f"calcany_{ticker}"
             await query.edit_message_text(f"❌ Ошибка при получении цели для {ticker}: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)]]))
 
     elif query.data == "trade_market":
@@ -1365,11 +1586,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price_exec = float(hist[pc].iloc[-1])
         price_exec = float(price_exec or 0.0)
         if action == "buy":
-            pos = user_portfolio.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
+            pos = user_portfolio_cache.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
             total_cost = pos["avg_price"] * pos["qty"] + price_exec * qty
             pos["qty"] += qty
             pos["avg_price"] = total_cost / max(pos["qty"], 1)
-            save_user_data()
+            save_portfolio_to_db(user_id, ticker, pos["qty"], pos["avg_price"])
             context.application.create_task(update_group_stats())
             await query.edit_message_text(f"✅ Покупка по рынку: {ticker} {qty} @ {price_exec:.2f}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="my_portfolio")]]))
             user_trade_context.pop(user_id, None)
@@ -1441,8 +1662,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = build_info_text(ticker, user_id)
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"ticker_info_menu_{ticker}")]]
             
-            chart_type = user_settings.get(user_id, {}).get("chart_type", "static")
-            advises_interval = user_settings.get(user_id, {}).get("advises_interval", "1M")
+            chart_type = user_settings_cache.get(user_id, {}).get("chart_type", "static")
+            advises_interval = user_settings_cache.get(user_id, {}).get("advises_interval", "1M")
             web_app_url = os.getenv("WEB_APP_BASE_URL")
             
             # Кнопка советов
@@ -1588,7 +1809,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ctx.get("action") == "sell":
             # Immediate sell by quantity only
             ticker = ctx.get("ticker")
-            pos = user_portfolio.setdefault(user_id, {}).get(ticker)
+            pos = user_portfolio_cache.setdefault(user_id, {}).get(ticker)
             if not pos or pos.get("qty", 0) <= 0:
                 await update.message.reply_text("❌ Нечего продавать.")
             else:
@@ -1597,10 +1818,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if pos["qty"] == 0:
                     pos["avg_price"] = 0.0
                     try:
-                        del user_portfolio[user_id][ticker]
+                        del user_portfolio_cache[user_id][ticker]
                     except Exception:
                         pass
-                save_user_data()
+                save_portfolio_to_db(user_id, ticker, pos["qty"], pos["avg_price"])
                 context.application.create_task(update_group_stats())
                 await update.message.reply_text(f"✅ Продажа выполнена: {ticker} {sell_qty}")
             user_trade_context.pop(user_id, None)
@@ -1635,11 +1856,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_trade_context.pop(user_id, None)
             return
         ticker = ctx.get("ticker") or "UNKNOWN"
-        pos = user_portfolio.setdefault(user_id, {}).setdefault(ticker, {"qty": 0, "avg_price": 0.0})
-        total_cost = pos["avg_price"] * pos["qty"] + price * qty
-        pos["qty"] += qty
-        pos["avg_price"] = total_cost / max(pos["qty"], 1)
-        save_user_data()
+        
+        # Обновляем портфель в БД
+        save_portfolio_to_db(user_id, ticker, qty, price, is_buy=True)
+
         context.application.create_task(update_group_stats())
         user_trade_context.pop(user_id, None)
         await update.message.reply_text(f"✅ Добавлено в портфель: {ticker} {qty} @ {price:.2f}")
@@ -1669,8 +1889,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_asset":
         ticker = update.message.text.strip().upper()
         
-        if ticker in blacklist:
-            blacklist_data = blacklist[ticker]
+        if ticker in blacklist_cache:
+            blacklist_data = blacklist_cache[ticker]
             user_name = get_user_name(blacklist_data["user_id"])
             comment = blacklist_data["comment"]
             
@@ -1698,24 +1918,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) >= 4:
             ticker = parts[3]
             comment = update.message.text.strip()
+            company_name = get_company_name(ticker) # Get company name for custom_name
             
-            user_assets.setdefault(user_id, [])
-            if ticker not in user_assets[user_id]:
-                user_assets[user_id].append(ticker)
-            
-            user_comments.setdefault(user_id, {})
-            user_comments[user_id][ticker] = comment
-
-            user_asset_names.setdefault(user_id, {})
-            company_name = get_company_name(ticker)
-            user_asset_names[user_id][ticker] = company_name
-            ticker_name_cache[ticker] = company_name
-            
-            save_user_data()
-            context.application.create_task(update_group_stats())
-            
-            user_states[user_id] = None
-            await update.message.reply_text(f"✅ Актив {ticker} добавлен с комментарием '{comment}'!", reply_markup=main_menu())
+            if user_id:
+                # Сохраняем в БД
+                save_asset_to_db(user_id, ticker, comment, company_name)
+                
+                # Обновляем кэш группы в фоне
+                context.application.create_task(update_group_stats())
+                
+                user_states[user_id] = None
+                await update.message.reply_text(f"✅ Актив {ticker} добавлен!", reply_markup=main_menu())
             
     elif user_states.get(user_id) == "waiting_for_blacklist_ticker":
         ticker = update.message.text.strip().upper()
@@ -1730,12 +1943,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ticker = parts[4]
             comment = update.message.text.strip()
             
-            blacklist[ticker] = {"user_id": user_id, "comment": comment}
+            # Сохраняем в БД
+            save_blacklist_to_db(ticker, user_id, comment)
             
-            save_blacklist()
             await notify_users_about_blacklist(context, ticker, user_id, comment)
-            remove_asset_from_all_users(ticker)
-            save_user_data()
+            remove_asset_from_all_users(ticker) # This also updates cache
             
             user_states[user_id] = None
             await update.message.reply_text(f"✅ Актив {ticker} добавлен в черный список с комментарием '{comment}'!", reply_markup=main_menu())
@@ -1743,10 +1955,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_remove_blacklist_ticker":
         ticker = update.message.text.strip().upper()
         
-        if ticker in blacklist:
-            del blacklist[ticker]
-            
-            save_blacklist()
+        if ticker in blacklist_cache:
+            # Удаляем из БД
+            remove_blacklist_from_db(ticker)
             
             await update.message.reply_text(f"✅ Актив {ticker} удален из черного списка!", reply_markup=main_menu())
         else:
@@ -1759,20 +1970,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) >= 3:
             ticker = parts[2]
             comment = update.message.text.strip()
+            company_name = get_company_name(ticker) # Get company name for custom_name
             
-            user_assets.setdefault(user_id, [])
-            if ticker not in user_assets[user_id]:
-                user_assets[user_id].append(ticker)
+            # Сохраняем в БД
+            save_asset_to_db(user_id, ticker, comment, company_name)
             
-            user_comments.setdefault(user_id, {})
-            user_comments[user_id][ticker] = comment
-
-            user_asset_names.setdefault(user_id, {})
-            company_name = get_company_name(ticker)
-            user_asset_names[user_id][ticker] = company_name
-            ticker_name_cache[ticker] = company_name
-            
-            save_user_data()
             context.application.create_task(update_group_stats())
             
             user_states[user_id] = None
@@ -1782,10 +1984,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = float(update.message.text.strip().replace(",", "."))
             # Суммируем с текущим значением
-            current_extra = user_extra_funds.get(user_id, 0.0)
+            current_extra = user_extra_funds_cache.get(user_id, 0.0)
             new_extra = current_extra + amount
-            user_extra_funds[user_id] = new_extra
-            save_user_data()
+            
+            # Сохраняем в БД
+            save_settings_to_db(user_id, extra_funds=new_extra)
+
             # Обновляем кэш, так как extra влияет на total
             context.application.create_task(update_group_stats())
             
@@ -1802,159 +2006,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def load_user_data():
-    """Загружает данные пользователей из файла users.txt"""
-    global user_assets, user_comments, user_settings, user_asset_names, ticker_name_cache, user_portfolio, user_extra_funds
-    try:
-        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
-        
-        if not os.path.exists(users_file_path):
-            save_user_data()
-            return
-        
-        with open(users_file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            
-        current_user_id = None
-        current_section = None
-        
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-                
-            if line.startswith("USER_ID:"):
-                current_user_id = int(line.split(":")[1])
-                user_assets[current_user_id] = []
-                user_comments[current_user_id] = {}
-                user_asset_names[current_user_id] = {}
-                user_portfolio[current_user_id] = {}
-                user_extra_funds[current_user_id] = 0.0
-                user_settings[current_user_id] = {
-                    "eps_bp": 5,
-                    "big_buy_mult": 2,
-                    "analysis_days": 5,
-                    "cycle_tf": "5m"
-                }
-            elif line.startswith("ASSETS:") and current_user_id:
-                current_section = "assets"
-            elif line.startswith("COMMENTS:") and current_user_id:
-                current_section = "comments"
-            elif line.startswith("NAMES:") and current_user_id:
-                current_section = "names"
-            elif line.startswith("PORTFOLIO:") and current_user_id:
-                current_section = "portfolio"
-            elif line.startswith("SETTINGS:") and current_user_id:
-                current_section = "settings"
-            elif line.startswith("EXTRA_FUNDS:") and current_user_id:
-                current_section = "extra_funds"
-            elif current_section == "assets" and current_user_id:
-                if line == "END_ASSETS":
-                    current_section = None
-                else:
-                    user_assets[current_user_id].append(line)
-            elif current_section == "comments" and current_user_id:
-                if line == "END_COMMENTS":
-                    current_section = None
-                else:
-                    if "=" in line:
-                        ticker, comment = line.split("=", 1)
-                        user_comments[current_user_id][ticker] = comment
-            elif current_section == "settings" and current_user_id:
-                if line == "END_SETTINGS":
-                    current_section = None
-                else:
-                    if "=" in line:
-                        key, value = line.split("=", 1)
-                        user_settings[current_user_id][key] = value
-            elif current_section == "names" and current_user_id:
-                if line == "END_NAMES":
-                    current_section = None
-                else:
-                    if "=" in line:
-                        ticker, name = line.split("=", 1)
-                        user_asset_names[current_user_id][ticker] = name
-                        ticker_name_cache[ticker] = name
-            elif current_section == "portfolio" and current_user_id:
-                if line == "END_PORTFOLIO":
-                    current_section = None
-                else:
-                    if "=" in line and "," in line:
-                        t, rest = line.split("=", 1)
-                        q_str, ap_str = rest.split(",", 1)
-                        try:
-                            user_portfolio[current_user_id][t] = {"qty": int(q_str), "avg_price": float(ap_str)}
-                        except Exception:
-                            pass
-            elif current_section == "extra_funds" and current_user_id:
-                if line == "END_EXTRA_FUNDS":
-                    current_section = None
-                else:
-                    try:
-                        user_extra_funds[current_user_id] = float(line)
-                    except Exception:
-                        pass
-    except Exception as e:
-        logging.error(f"Ошибка при загрузке данных пользователей: {e}")
-        user_assets = {}
-        user_comments = {}
-        user_asset_names = {}
-        user_settings = {}
-        ticker_name_cache = {}
-        ticker_name_cache = {}
-        user_portfolio = {}
-        user_extra_funds = {}
+    """Загружает данные пользователей из БД"""
+    load_data_from_db()
 
 def save_user_data():
-    """Сохраняет данные пользователей в файл users.txt"""
-    try:
-        users_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "users.txt")
-        
-        with open(users_file_path, "w", encoding="utf-8") as f:
-            for user_id in user_assets.keys():
-                f.write(f"USER_ID:{user_id}\n")
-                
-                f.write("ASSETS:\n")
-                for asset in user_assets.get(user_id, []):
-                    f.write(f"{asset}\n")
-                f.write("END_ASSETS\n")
-                
-                f.write("COMMENTS:\n")
-                comments = user_comments.get(user_id, {})
-                for ticker, comment in comments.items():
-                    f.write(f"{ticker}={comment}\n")
-                f.write("END_COMMENTS\n")
-                
-                f.write("NAMES:\n")
-                names = user_asset_names.get(user_id, {})
-                for ticker, name in names.items():
-                    f.write(f"{ticker}={name}\n")
-                f.write("END_NAMES\n")
-
-                f.write("PORTFOLIO:\n")
-                portfolio = user_portfolio.get(user_id, {})
-                for t, pos in portfolio.items():
-                    f.write(f"{t}={pos.get('qty', 0)},{pos.get('avg_price', 0.0)}\n")
-                f.write("END_PORTFOLIO\n")
-
-                f.write("EXTRA_FUNDS:\n")
-                f.write(f"{user_extra_funds.get(user_id, 0.0)}\n")
-                f.write("END_EXTRA_FUNDS\n")
-
-                f.write("SETTINGS:\n")
-                settings = {
-                    "eps_bp": 5,
-                    "big_buy_mult": 2,
-                    "analysis_days": 5,
-                    "cycle_tf": "5m"
-                }
-                for key, value in settings.items():
-                    f.write(f"{key}={value}\n")
-                f.write("END_SETTINGS\n")
-                f.write("\n")
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении данных пользователей: {e}")
-
-load_user_data()
+    """DEPRECATED: Data is now saved to DB immediately."""
+    pass
 
 def load_group_cache():
     global group_stats_cache
@@ -1986,11 +2043,11 @@ async def update_group_stats():
     total_current_all = 0.0
     
     # Считаем extra funds
-    total_extra_all = sum(user_extra_funds.values())
+    total_extra_all = sum(user_extra_funds_cache.values())
 
     for uid in TRUSTED_USERS:
         u_name = get_user_name(uid)
-        portfolio = user_portfolio.get(uid, {})
+        portfolio = user_portfolio_cache.get(uid, {})
         
         for ticker, pos in portfolio.items():
             qty = pos.get("qty", 0)
@@ -2057,63 +2114,31 @@ async def update_group_stats():
     }
     save_group_cache()
 
-def load_blacklist():
-    """Загружает черный список из файла blacklist.txt"""
-    global blacklist
-    try:
-        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
         
-        if not os.path.exists(blacklist_file_path):
-            save_blacklist()
-            return
-        
-        with open(blacklist_file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-                
-            if "=" in line:
-                parts = line.split("=", 2)
-                if len(parts) >= 3:
-                    ticker = parts[0]
-                    user_id = int(parts[1])
-                    comment = parts[2]
-                    blacklist[ticker] = {"user_id": user_id, "comment": comment}
-    except Exception as e:
-        logging.error(f"Ошибка при загрузке черного списка: {e}")
-        blacklist = {}
 
-def save_blacklist():
-    """Сохраняет черный список в файл blacklist.txt"""
-    try:
-        blacklist_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "blacklist.txt")
-        
-        with open(blacklist_file_path, "w", encoding="utf-8") as f:
-            for ticker, data in blacklist.items():
-                f.write(f"{ticker}={data['user_id']}={data['comment']}\n")
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении черного списка: {e}")
 
 def get_user_name(user_id):
     """Получает имя пользователя по ID"""
     return USER_NAMES.get(user_id, f"User_{user_id}")
 
 def remove_asset_from_all_users(ticker):
-    """Удаляет актив из списков всех пользователей"""
-    for user_id in user_assets:
-        if ticker in user_assets[user_id]:
-            user_assets[user_id].remove(ticker)
-            if user_id in user_comments and ticker in user_comments[user_id]:
-                del user_comments[user_id][ticker]
-                if not user_comments[user_id]:
-                    del user_comments[user_id]
-            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
-                del user_asset_names[user_id][ticker]
-                if not user_asset_names[user_id]:
-                    del user_asset_names[user_id]
+    """Удаляет актив у всех пользователей (например, при добавлении в черный список)"""
+    # Удаляем из БД
+    conn = get_db_connection()
+    conn.execute("DELETE FROM assets WHERE ticker = ?", (ticker,))
+    conn.commit()
+    conn.close()
+    
+    # Обновляем кэш
+    for user_id in list(user_assets_cache.keys()):
+        if ticker in user_assets_cache[user_id]:
+            user_assets_cache[user_id].remove(ticker)
+        
+        if user_id in user_comments_cache and ticker in user_comments_cache[user_id]:
+            del user_comments_cache[user_id][ticker]
+            
+        if user_id in user_asset_names_cache and ticker in user_asset_names_cache[user_id]:
+            del user_asset_names_cache[user_id][ticker]
 
 async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
     """Отправляет уведомления пользователям об добавлении актива в черный список"""
@@ -2128,7 +2153,7 @@ async def notify_users_about_blacklist(context, ticker, added_by_user_id, commen
             except Exception as e:
                 logging.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
 
-load_blacklist()
+
 
 def calculate_pe_ratio(ticker):
     stock = yf.Ticker(ticker)
@@ -2492,6 +2517,9 @@ def fetch_finviz_insider(ticker):
 
 async def post_init(application: Application):
     """Выполняется после инициализации приложения, но до начала polling"""
+    logging.info("Загрузка данных из БД...")
+    load_data_from_db()
+    
     logging.info("Запуск обновления статистики группы при старте...")
     # Запускаем обновление в фоне (или ждем завершения, если критично)
     # Лучше подождать, чтобы данные были готовы сразу
@@ -2865,6 +2893,43 @@ async def cmd_insider(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
+async def cmd_debug_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug command to check DB status"""
+    user_id = update.effective_user.id
+    if user_id not in TRUSTED_USERS:
+        return
+
+    lines = [f"🛠 <b>DB Debug Info</b>", ""]
+    lines.append(f"DB Path: <code>{DB_NAME}</code>")
+    
+    if os.path.exists(DB_NAME):
+        lines.append("✅ DB file exists.")
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM users")
+            users_count = cursor.fetchone()[0]
+            lines.append(f"Users in DB: {users_count}")
+            
+            cursor.execute("SELECT COUNT(*) FROM assets")
+            assets_count = cursor.fetchone()[0]
+            lines.append(f"Assets in DB: {assets_count}")
+            
+            conn.close()
+        except Exception as e:
+            lines.append(f"❌ DB Connection Error: {e}")
+    else:
+        lines.append("❌ DB file NOT found!")
+        
+    lines.append("")
+    lines.append(f"<b>In-Memory Cache:</b>")
+    lines.append(f"Users with assets: {len(user_assets_cache)}")
+    lines.append(f"Portfolios: {len(user_portfolio_cache)}")
+    lines.append(f"Blacklist: {len(blacklist_cache)}")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
@@ -2876,6 +2941,7 @@ def main():
     app.add_handler(CommandHandler("top_losers", cmd_top_losers))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("insider", cmd_insider))
+    app.add_handler(CommandHandler("debug_db", cmd_debug_db))
     
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(InlineQueryHandler(inline_query_handler))
