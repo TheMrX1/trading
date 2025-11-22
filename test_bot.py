@@ -498,32 +498,16 @@ def advises_settings_menu(user_id):
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    
+    user_id = update.effective_user.id
     if user_id not in TRUSTED_USERS:
-        await update.message.reply_text("Извините, у вас нет доступа к этому боту.")
+        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
         return
-
-    # Сохраняем пользователя в БД (на всякий случай, если новый)
-    conn = get_db_connection()
-    conn.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, user.username))
-    conn.commit()
-    conn.close()
-
-    text = (
-        f"👋 Привет, {user.first_name}!\n\n"
-        f"Я бот для отслеживания инвестиций.\n"
-        f"Выберите раздел меню:"
-    )
     
-    keyboard = [
-        [InlineKeyboardButton("💼 Мой портфель", callback_data="menu_portfolio")],
-        [InlineKeyboardButton("👥 Инвестиции группы", callback_data="menu_group")],
-        [InlineKeyboardButton("🛠 Инструменты рынка", callback_data="menu_tools")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")]
-    ]
+    name = get_user_name(user_id)
+    text = (f"👋 Привет, {name}!\n\n"
+            "Я разработан... Да впринципе Вам пофигу, Кем. А в остальном, желаю удачи и приятного использования")
     
+    keyboard = [[InlineKeyboardButton("главное меню", callback_data="show_main_menu")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_assets_menu(query, user_id, page=0):
@@ -1089,116 +1073,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Введите тикер актива (например, AAPL):",
                                       reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # --- Navigation ---
-    if query.data == "menu_main":
-        text = (
-            f"👋 Привет, {query.from_user.first_name}!\n\n"
-            f"Я бот для отслеживания инвестиций.\n"
-            f"Выберите раздел меню:"
-        )
-        keyboard = [
-            [InlineKeyboardButton("💼 Мой портфель", callback_data="menu_portfolio")],
-            [InlineKeyboardButton("👥 Инвестиции группы", callback_data="menu_group")],
-            [InlineKeyboardButton("🛠 Инструменты рынка", callback_data="menu_tools")],
-            [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif query.data == "menu_portfolio":
-        await show_portfolio_menu(query, user_id)
-        
-    elif query.data == "menu_group":
-        # Reuse existing logic but ensure back button goes to main menu
-        await cmd_investisions(update, context) # This sends a new message, maybe adapt to edit?
-        # For now let's just trigger the existing function logic but adapted for callback
-        if not group_stats_cache:
-             await query.answer("Обновляю данные...")
-             await update_group_stats()
-        
-        # ... (logic to show group stats, similar to cmd_investisions but editing message)
-        # For simplicity, let's redirect to the command handler which sends a new message, 
-        # but ideally we should edit. Let's keep it simple for now.
-        await query.answer()
-        await cmd_investisions(update, context)
-        
-    elif query.data == "menu_tools":
-        text = "🛠 <b>Инструменты рынка</b>\nВыберите инструмент:"
-        keyboard = [
-            [InlineKeyboardButton("🔍 Поиск тикера", callback_data="tool_search")],
-            [InlineKeyboardButton("🚀 Top Gainers", callback_data="tool_gainers"), InlineKeyboardButton("🔻 Top Losers", callback_data="tool_losers")],
-            [InlineKeyboardButton("📰 Новости", callback_data="tool_news"), InlineKeyboardButton("🕵️ Инсайдеры", callback_data="tool_insider")],
-            [InlineKeyboardButton("🔙 Назад в меню", callback_data="menu_main")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    elif query.data == "my_assets":
+        assets = user_assets_cache.get(user_id, [])
+        if not assets:
+            await query.edit_message_text("У вас пока нет активов.", reply_markup=main_menu())
+            return
+        user_trade_context.pop(user_id, None)
+        await show_assets_menu(query, user_id, page=0)
 
-    elif query.data == "menu_settings":
-        settings = user_settings_cache.get(user_id, {"chart_type": "static", "advises_interval": "1M"})
-        chart_type = settings.get("chart_type", "static")
-        interval = settings.get("advises_interval", "1M")
-        
-        text = (
-            f"⚙️ <b>Настройки</b>\n\n"
-            f"📊 Тип графика: <b>{'Интерактивный' if chart_type == 'dynamic' else 'Статический (Finviz)'}</b>\n"
-            f"⏱ Интервал советов: <b>{interval}</b>"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton(f"📊 График: {'Dynamic' if chart_type == 'dynamic' else 'Static'}", callback_data="setting_chart_toggle")],
-            [InlineKeyboardButton(f"⏱ Интервал: {interval}", callback_data="setting_interval_cycle")],
-            [InlineKeyboardButton("💵 Добавить средства", callback_data="add_extra_funds")],
-            [InlineKeyboardButton("🔙 Назад в меню", callback_data="menu_main")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-
-    # --- Tools ---
-    elif query.data == "tool_search":
-        user_states[user_id] = "waiting_for_ticker_search"
-        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="menu_tools")]]
-        await query.edit_message_text("🔍 Введите тикер для поиска (например, AAPL):", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif query.data == "tool_gainers":
-        await query.answer("Загружаю...")
-        await cmd_top_gainers(update, context)
-        
-    elif query.data == "tool_losers":
-        await query.answer("Загружаю...")
-        await cmd_top_losers(update, context)
-        
-    elif query.data == "tool_news":
-        user_states[user_id] = "waiting_for_news_ticker"
-        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="menu_tools")]]
-        await query.edit_message_text("📰 Введите тикер для поиска новостей:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif query.data == "tool_insider":
-        user_states[user_id] = "waiting_for_insider_ticker"
-        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="menu_tools")]]
-        await query.edit_message_text("🕵️ Введите тикер для поиска инсайдеров:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    # --- Settings Actions ---
-    elif query.data == "setting_chart_toggle":
-        current = user_settings_cache.get(user_id, {}).get("chart_type", "static")
-        new_type = "dynamic" if current == "static" else "static"
-        save_settings_to_db(user_id, chart_type=new_type)
-        # Refresh menu
-        await button_handler(update, context) # Recursively call to refresh
-        
-    elif query.data == "setting_interval_cycle":
-        intervals = ["1M", "3M", "6M", "1Y"]
-        current = user_settings_cache.get(user_id, {}).get("advises_interval", "1M")
-        try:
-            idx = intervals.index(current)
-            new_interval = intervals[(idx + 1) % len(intervals)]
-        except ValueError:
-            new_interval = "1M"
-        save_settings_to_db(user_id, advises_interval=new_interval)
-        # Refresh menu
-        await button_handler(update, context)
-
-    elif query.data == "show_main_menu": # Legacy support or back button
-        # Redirect to menu_main logic
-        query.data = "menu_main"
-        await button_handler(update, context)
-        
     elif query.data == "my_portfolio":
         user_trade_context.pop(user_id, None)
         await show_portfolio_menu(query, user_id)
@@ -2004,32 +1886,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text(f"Тикер {display_name}. Выберите действие:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # --- New Tool States ---
-    elif user_states.get(user_id) == "waiting_for_ticker_search":
-        ticker = update.message.text.strip().upper()
-        # Reuse existing ticker info logic
-        try:
-            text = build_ticker_info_text(ticker, user_id)
-            photo_url = get_finviz_chart_url(ticker)
-            await update.message.reply_photo(photo=photo_url, caption=text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {e}")
-        user_states[user_id] = None
-        
-    elif user_states.get(user_id) == "waiting_for_news_ticker":
-        ticker = update.message.text.strip().upper()
-        # Reuse news logic
-        context.args = [ticker]
-        await cmd_news(update, context)
-        user_states[user_id] = None
-
-    elif user_states.get(user_id) == "waiting_for_insider_ticker":
-        ticker = update.message.text.strip().upper()
-        # Reuse insider logic
-        context.args = [ticker]
-        await cmd_insider(update, context)
-        user_states[user_id] = None
-
     elif user_states.get(user_id) == "waiting_for_asset":
         ticker = update.message.text.strip().upper()
         
@@ -2257,6 +2113,9 @@ async def update_group_stats():
         }
     }
     save_group_cache()
+
+        
+
 
 def get_user_name(user_id):
     """Получает имя пользователя по ID"""
@@ -2667,17 +2526,6 @@ async def post_init(application: Application):
     await update_group_stats()
     logging.info("Статистика группы обновлена.")
 
-    # Установка команд меню
-    commands = [
-        ("start", "🏠 Главное меню"),
-        ("portfolio", "💼 Мой портфель"),
-        ("investisions", "👥 Инвестиции группы"),
-        ("tools", "🛠 Инструменты рынка"),
-        ("settings", "⚙️ Настройки"),
-        ("help", "ℹ️ Помощь")
-    ]
-    await application.bot.set_my_commands(commands)
-
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик inline-запросов"""
     query = update.inline_query.query.strip().upper()
@@ -3045,43 +2893,6 @@ async def cmd_insider(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in TRUSTED_USERS:
-        return
-    
-    text = "🛠 <b>Инструменты рынка</b>\nВыберите инструмент:"
-    keyboard = [
-        [InlineKeyboardButton("🔍 Поиск тикера", callback_data="tool_search")],
-        [InlineKeyboardButton("🚀 Top Gainers", callback_data="tool_gainers"), InlineKeyboardButton("🔻 Top Losers", callback_data="tool_losers")],
-        [InlineKeyboardButton("📰 Новости", callback_data="tool_news"), InlineKeyboardButton("🕵️ Инсайдеры", callback_data="tool_insider")],
-        [InlineKeyboardButton("🔙 Назад в меню", callback_data="menu_main")]
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-
-async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in TRUSTED_USERS:
-        return
-    
-    settings = user_settings_cache.get(user_id, {"chart_type": "static", "advises_interval": "1M"})
-    chart_type = settings.get("chart_type", "static")
-    interval = settings.get("advises_interval", "1M")
-    
-    text = (
-        f"⚙️ <b>Настройки</b>\n\n"
-        f"📊 Тип графика: <b>{'Интерактивный' if chart_type == 'dynamic' else 'Статический (Finviz)'}</b>\n"
-        f"⏱ Интервал советов: <b>{interval}</b>"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton(f"📊 График: {'Dynamic' if chart_type == 'dynamic' else 'Static'}", callback_data="setting_chart_toggle")],
-        [InlineKeyboardButton(f"⏱ Интервал: {interval}", callback_data="setting_interval_cycle")],
-        [InlineKeyboardButton("💵 Добавить средства", callback_data="add_extra_funds")],
-        [InlineKeyboardButton("🔙 Назад в меню", callback_data="menu_main")]
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-
 async def cmd_debug_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Debug command to check DB status"""
     user_id = update.effective_user.id
@@ -3130,8 +2941,6 @@ def main():
     app.add_handler(CommandHandler("top_losers", cmd_top_losers))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("insider", cmd_insider))
-    app.add_handler(CommandHandler("tools", cmd_tools))
-    app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("debug_db", cmd_debug_db))
     
     app.add_handler(CallbackQueryHandler(button_handler))
