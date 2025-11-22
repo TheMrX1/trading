@@ -148,12 +148,14 @@ def load_data_from_db():
     global user_comments_cache, user_asset_names_cache, blacklist_cache, user_extra_funds_cache
     
     init_db()
+    logging.info(f"Connecting to database at: {DB_NAME}")
     conn = get_db_connection()
     cursor = conn.cursor()
     
     # Load Assets & Comments & Names
     cursor.execute("SELECT user_id, ticker, comment, custom_name FROM assets")
     rows = cursor.fetchall()
+    logging.info(f"Fetched {len(rows)} asset rows from DB.")
     for row in rows:
         uid = row["user_id"]
         ticker = row["ticker"]
