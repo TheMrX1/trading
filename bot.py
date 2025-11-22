@@ -23,9 +23,9 @@ from telegram.ext import (
 from uuid import uuid4
 
 load_dotenv()
-BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("TEST_BOT_TOKEN not found in .env file")
+    raise ValueError("BOT_TOKEN not found in .env file")
 
 #TRUSTED_USERS = [1085064193, 7424028554]
 TRUSTED_USERS = [1085064193, 1563262750, 829213580, 1221434895, 1229198783, 1647115336, 5405897708]
