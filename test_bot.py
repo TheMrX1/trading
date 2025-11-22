@@ -1887,8 +1887,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_asset":
         ticker = update.message.text.strip().upper()
         
-        if ticker in blacklist:
-            blacklist_data = blacklist[ticker]
+        if ticker in blacklist_cache:
+            blacklist_data = blacklist_cache[ticker]
             user_name = get_user_name(blacklist_data["user_id"])
             comment = blacklist_data["comment"]
             
@@ -1953,7 +1953,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_states.get(user_id) == "waiting_for_remove_blacklist_ticker":
         ticker = update.message.text.strip().upper()
         
-        if ticker in blacklist:
+        if ticker in blacklist_cache:
             # Удаляем из БД
             remove_blacklist_from_db(ticker)
             
