@@ -68,7 +68,7 @@ user_trade_context = {}
 # Кэш статистики группы
 group_stats_cache = {}  # {"last_update": ts, "data": {...}}
 
-DB_NAME = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bot_database.db")
+DB_NAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot_database.db")
 
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
@@ -195,6 +195,7 @@ def load_data_from_db():
         }
         
     conn.close()
+    logging.info(f"Loaded from DB: {len(user_assets_cache)} users with assets, {len(user_portfolio_cache)} portfolios, {len(blacklist_cache)} blacklist items.")
 
 def save_asset_to_db(user_id, ticker, comment="", custom_name=""):
     conn = get_db_connection()
@@ -540,11 +541,12 @@ def get_portfolio_text_and_keyboard(user_id):
         except Exception:
             pass
     lines = ["💼 <b>Мой портфель:</b>", ""]
+    total_change = 0.0
+    total_invested = 0.0
+    
     if not positions:
         lines.append("<i>Пока нет позиций.</i>")
     else:
-        total_change = 0.0
-        total_invested = 0.0
         for ticker, pos in positions.items():
             qty = pos.get("qty", 0)
             avg_price = pos.get("avg_price", 0.0)
@@ -1980,11 +1982,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = float(update.message.text.strip().replace(",", "."))
             # Суммируем с текущим значением
-            current_extra = user_extra_funds.get(user_id, 0.0)
+            current_extra = user_extra_funds_cache.get(user_id, 0.0)
             new_extra = current_extra + amount
             
             # Сохраняем в БД
-            save_extra_funds_to_db(user_id, new_extra)
+            save_settings_to_db(user_id, extra_funds=new_extra)
 
             # Обновляем кэш, так как extra влияет на total
             context.application.create_task(update_group_stats())
@@ -2047,11 +2049,11 @@ async def update_group_stats():
     total_current_all = 0.0
     
     # Считаем extra funds
-    total_extra_all = sum(user_extra_funds.values())
+    total_extra_all = sum(user_extra_funds_cache.values())
 
     for uid in TRUSTED_USERS:
         u_name = get_user_name(uid)
-        portfolio = user_portfolio.get(uid, {})
+        portfolio = user_portfolio_cache.get(uid, {})
         
         for ticker, pos in portfolio.items():
             qty = pos.get("qty", 0)
@@ -2126,18 +2128,23 @@ def get_user_name(user_id):
     return USER_NAMES.get(user_id, f"User_{user_id}")
 
 def remove_asset_from_all_users(ticker):
-    """Удаляет актив из списков всех пользователей"""
-    for user_id in user_assets:
-        if ticker in user_assets[user_id]:
-            user_assets[user_id].remove(ticker)
-            if user_id in user_comments and ticker in user_comments[user_id]:
-                del user_comments[user_id][ticker]
-                if not user_comments[user_id]:
-                    del user_comments[user_id]
-            if user_id in user_asset_names and ticker in user_asset_names[user_id]:
-                del user_asset_names[user_id][ticker]
-                if not user_asset_names[user_id]:
-                    del user_asset_names[user_id]
+    """Удаляет актив у всех пользователей (например, при добавлении в черный список)"""
+    # Удаляем из БД
+    conn = get_db_connection()
+    conn.execute("DELETE FROM assets WHERE ticker = ?", (ticker,))
+    conn.commit()
+    conn.close()
+    
+    # Обновляем кэш
+    for user_id in list(user_assets_cache.keys()):
+        if ticker in user_assets_cache[user_id]:
+            user_assets_cache[user_id].remove(ticker)
+        
+        if user_id in user_comments_cache and ticker in user_comments_cache[user_id]:
+            del user_comments_cache[user_id][ticker]
+            
+        if user_id in user_asset_names_cache and ticker in user_asset_names_cache[user_id]:
+            del user_asset_names_cache[user_id][ticker]
 
 async def notify_users_about_blacklist(context, ticker, added_by_user_id, comment):
     """Отправляет уведомления пользователям об добавлении актива в черный список"""
