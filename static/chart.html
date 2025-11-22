@@ -12,8 +12,8 @@
             padding: 0;
             height: 100%;
             overflow: hidden;
-            background-color: #131722;
-            /* Dark theme background match */
+            background-color: #0F0F0F;
+            /* Match widget background */
         }
 
         .tradingview-widget-container {
@@ -25,20 +25,38 @@
 
 <body>
     <!-- TradingView Widget BEGIN -->
-    <div class="tradingview-widget-container">
-        <div class="tradingview-widget-container__widget"></div>
+    <div class="tradingview-widget-container" style="height:100%;width:100%">
+        <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
+        <div class="tradingview-widget-copyright"><a href="https://www.tradingview.com/" rel="noopener nofollow"
+                target="_blank"><span class="blue-text">Track all markets on TradingView</span></a></div>
         <script type="text/javascript"
-            src="https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js" async>
+            src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
                 {
-                    "symbol": "FX:EURUSD",
-                        "width": "100%",
-                            "height": "100%",
-                                "locale": "en",
-                                    "dateRange": "12M",
-                                        "colorTheme": "dark",
-                                            "isTransparent": false,
-                                                "autosize": true,
-                                                    "largeChartUrl": ""
+                    "autosize": true,
+                        "symbol": "NASDAQ:AAPL",
+                            "interval": "D",
+                                "timezone": "Etc/UTC",
+                                    "theme": "dark",
+                                        "style": "1",
+                                            "locale": "en",
+                                                "enable_publishing": false,
+                                                    "backgroundColor": "#0F0F0F",
+                                                        "gridColor": "rgba(242, 242, 242, 0.06)",
+                                                            "allow_symbol_change": true,
+                                                                "calendar": false,
+                                                                    "details": false,
+                                                                        "hide_side_toolbar": true,
+                                                                            "hide_top_toolbar": false,
+                                                                                "hide_legend": false,
+                                                                                    "hide_volume": false,
+                                                                                        "hotlist": false,
+                                                                                            "save_image": true,
+                                                                                                "watchlist": [],
+                                                                                                    "withdateranges": false,
+                                                                                                        "compareSymbols": [],
+                                                                                                            "studies": [
+                                                                                                                "STD;RSI"
+                                                                                                            ]
                 }
             </script>
     </div>
@@ -56,35 +74,47 @@
         }
 
         // Get symbol from URL parameter, default to AAPL if not present
-        const symbol = getParameterByName('symbol') || 'AAPL';
+        const symbol = getParameterByName('symbol') || 'NASDAQ:AAPL';
 
         // Update the widget configuration dynamically
-        // Note: The TradingView widget script executes immediately. 
-        // To make it dynamic, we need to inject the script with the correct symbol.
 
-        const container = document.querySelector('.tradingview-widget-container__widget');
-        // Remove the static script if it exists (though in this structure it's cleaner to just write it fresh)
-
-        // Clear existing content (if any)
-        document.querySelector('.tradingview-widget-container').innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+        // Clear existing content to prevent duplication
+        const container = document.querySelector('.tradingview-widget-container');
+        container.innerHTML = '<div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div><div class="tradingview-widget-copyright"><a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank"><span class="blue-text">Track all markets on TradingView</span></a></div>';
 
         const script = document.createElement('script');
         script.type = 'text/javascript';
-        script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js';
+        script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
         script.async = true;
         script.innerHTML = JSON.stringify({
-            "symbol": symbol,
-            "width": "100%",
-            "height": "100%",
-            "locale": "ru",
-            "dateRange": "12M",
-            "colorTheme": "dark",
-            "isTransparent": false,
             "autosize": true,
-            "largeChartUrl": ""
+            "symbol": symbol,
+            "interval": "D",
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "ru",
+            "enable_publishing": false,
+            "backgroundColor": "#0F0F0F",
+            "gridColor": "rgba(242, 242, 242, 0.06)",
+            "allow_symbol_change": true,
+            "calendar": false,
+            "details": false,
+            "hide_side_toolbar": true,
+            "hide_top_toolbar": false,
+            "hide_legend": false,
+            "hide_volume": false,
+            "hotlist": false,
+            "save_image": true,
+            "watchlist": [],
+            "withdateranges": false,
+            "compareSymbols": [],
+            "studies": [
+                "STD;RSI"
+            ]
         });
 
-        document.querySelector('.tradingview-widget-container').appendChild(script);
+        container.appendChild(script);
     </script>
 </body>
 
