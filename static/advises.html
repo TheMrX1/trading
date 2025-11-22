@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradingView Technical Analysis</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0F0F0F;
+            /* Dark theme background */
+        }
+
+        .tradingview-widget-container {
+            height: 100%;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- TradingView Widget BEGIN -->
+    <div class="tradingview-widget-container">
+        <div class="tradingview-widget-container__widget"></div>
+        <div class="tradingview-widget-copyright"><a href="https://www.tradingview.com/" rel="noopener nofollow"
+                target="_blank"><span class="blue-text">Track all markets on TradingView</span></a></div>
+        <script type="text/javascript"
+            src="https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js" async>
+                {
+                    "interval": "1M",
+                        "width": "100%",
+                            "isTransparent": false,
+                                "height": "100%",
+                                    "symbol": "NASDAQ:AAPL",
+                                        "showIntervalTabs": true,
+                                            "displayMode": "multiple",
+                                                "locale": "en",
+                                                    "colorTheme": "dark"
+                }
+            </script>
+    </div>
+    <!-- TradingView Widget END -->
+
+    <script>
+        function getParameterByName(name, url = window.location.href) {
+            name = name.replace(/[\[\]]/g, '\\$&');
+            var regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+                results = regex.exec(url);
+            if (!results) return null;
+            if (!results[2]) return '';
+            return decodeURIComponent(results[2].replace(/\+/g, ' '));
+        }
+
+        const symbol = getParameterByName('symbol') || 'NASDAQ:AAPL';
+        const interval = getParameterByName('interval') || '1M';
+
+        const container = document.querySelector('.tradingview-widget-container');
+        container.innerHTML = '<div class="tradingview-widget-container__widget"></div><div class="tradingview-widget-copyright"><a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank"><span class="blue-text">Track all markets on TradingView</span></a></div>';
+
+        const script = document.createElement('script');
+        script.type = 'text/javascript';
+        script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js';
+        script.async = true;
+        script.innerHTML = JSON.stringify({
+            "interval": interval,
+            "width": "100%",
+            "isTransparent": false,
+            "height": "100%",
+            "symbol": symbol,
+            "showIntervalTabs": true,
+            "displayMode": "multiple",
+            "locale": "ru",
+            "colorTheme": "dark"
+        });
+
+        container.appendChild(script);
+    </script>
+</body>
+
+</html>
